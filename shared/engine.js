@@ -462,7 +462,9 @@
       const code = str(p.code, 'کد دارایی', { max: 12 }).toUpperCase();
       if (!/^[A-Z0-9]{2,12}$/.test(code)) fail('کد دارایی فقط حروف انگلیسی و عدد است.');
       const data = { code, name: str(p.name, 'نام دارایی', { max: 40 }), unit: str(p.unit, 'واحد مقدار', { max: 12 }),
-        priceCurrency: str(p.priceCurrency, 'واحد قیمت', { max: 12 }), kind: p.kind === 'metal' ? 'metal' : 'currency' };
+        priceCurrency: str(p.priceCurrency, 'واحد قیمت', { max: 12 }), kind: p.kind === 'metal' ? 'metal' : 'currency',
+        aliases: String(p.aliases || '').split(/[,،\n]/).map((x) => x.trim()).filter(Boolean).slice(0, 12),
+        popular: p.popular === true || p.popular === 'on' || p.popular === 'true', sortOrder: Number(p.sortOrder) || 99 };
       let a = p.id ? assetOf(S, p.id) : null;
       const clash = S.one('assets', { code });
       if (clash && (!a || clash.id !== a.id)) fail('این کد قبلاً ثبت شده است.', 'conflict');
@@ -476,23 +478,6 @@
       const a = getOr(S, 'assets', p.assetId, 'دارایی پیدا نشد.');
       a.active = !a.active; S.put('assets', a);
       audit(S, ctx, me, 'admin.asset.toggle', `asset:${a.id}`, String(a.active));
-      market(ctx);
-      return { ok: true };
-    },
-    'admin.rate.set'(S, me, p, ctx) {
-      requireAdmin(S, me);
-      const a = getOr(S, 'assets', p.assetId, 'دارایی پیدا نشد.');
-      const buy = num(p.buy, 'نرخ خرید'), sell = num(p.sell, 'نرخ فروش');
-      if (sell < buy) fail('نرخ فروش نمی‌تواند کمتر از نرخ خرید باشد.');
-      if ((sell - buy) / buy > 0.1) fail('فاصله نرخ خرید و فروش بیش از ۱۰٪ است. ارقام را بررسی کنید.');
-      const r = S.one('rates', { assetId: a.id });
-      const prevMid = r ? (r.buy + r.sell) / 2 : null, mid = (buy + sell) / 2;
-      if (prevMid && Math.abs(mid - prevMid) / prevMid > RATE_GUARD && !p.confirmLarge) {
-        fail(`تغییر ${Math.round((Math.abs(mid - prevMid) / prevMid) * 100)}٪ نسبت به نرخ قبلی. برای ثبت، تغییر بزرگ را تأیید کنید.`, 'confirm');
-      }
-      S.put('rates', { ...(r || {}), assetId: a.id, buy, sell, prevMid, currency: a.priceCurrency, updatedAt: ctx.now });
-      S.put('rateHistory', { assetId: a.id, at: ctx.now, buy, sell });
-      audit(S, ctx, me, 'admin.rate.set', `asset:${a.id}`, `${a.code} ${buy}/${sell}${prevMid ? ` (prev mid ${round(prevMid)})` : ''}`);
       market(ctx);
       return { ok: true };
     },
@@ -515,8 +500,358 @@
     },
   };
 
+
+  /* =========================================================
+     Market rates: currencies, cities, Telegram ingestion
+     A rate is identified by: currency code | quote currency | city | settlement.
+     Buy and sell are stored independently; a side is shown only when it was published.
+     ========================================================= */
+  const MARKETS = ['کابل', 'کندهار', 'هرات', 'مزار شریف', 'جلال‌آباد', 'قندوز', 'غزنی'];
+  const QUOTES = { AFN: 'افغانی', IRT: 'تومان', USD: 'دالر', PKR: 'کلدار' };
+  const SETTLEMENT = { cash: 'نقدی', forward: 'فردایی' };
+  const RATE_RULES = { maxSpread: 0.05, maxJump: 0.10 }; // automatic updates beyond these go to review
+  const rateKey = (code, quote, market, settlement) => `${code}|${quote}|${market}|${settlement}`;
+  const DEFAULT_CURRENCIES = [
+    ['USD', 'دالر امریکایی', ['دالر', 'دلار', 'usd', 'dollar'], true],
+    ['PKR', 'کلدار پاکستانی', ['کلدار', 'روپیه پاکستان', 'pkr'], true],
+    ['IRR', 'تومان ایران', ['تومان', 'irr', 'irt'], true],
+    ['IRC', 'چک تومان', ['چک'], false],
+    ['EUR', 'یورو', ['یورو', 'eur', 'euro'], true],
+    ['GBP', 'پوند انگلیس', ['پوند', 'gbp'], false],
+    ['AED', 'درهم امارات', ['درهم', 'aed'], true],
+    ['IQD', 'دینار عراق', ['دینار عراق', 'iqd'], false],
+    ['KWD', 'دینار کویت', ['دینار کویت', 'kwd'], false],
+    ['SAR', 'ریال عربستان', ['ریال عربستان', 'ریال سعودی', 'sar'], false],
+    ['TRY', 'لیر ترکیه', ['لیر', 'lira', 'try'], false],
+    ['CNY', 'یوان چین', ['یوان', 'cny'], false],
+    ['RUB', 'روبل روسیه', ['روبل', 'rub'], false],
+  ];
+
+  // ---------- text normalisation ----------
+  function normText(s) {
+    return toLatinDigits(String(s || ''))
+      .replace(/[يى]/g, 'ی').replace(/ك/g, 'ک').replace(/ۍ/g, 'ی').replace(/[ئ]/g, 'ی').replace(/ة/g, 'ه')
+      .replace(/ـ/g, '').replace(/[‌‍‎‏]/g, ' ')
+      .replace(/[^\p{L}\p{N}.,:/\s-]/gu, ' ')
+      .replace(/[ \t]+/g, ' ').trim();
+  }
+  const NUM_RE = /\d[\d.,]*\d|\d/g;
+  // Parse a number as written in the channel. Returns { value, odd } (odd = unusual format, needs review).
+  function parseNum(raw, quote) {
+    let s = String(raw).replace(/^[.,]+|[.,]+$/g, '');
+    if (quote === 'IRT' && /^\d{1,3}([.,]\d{3})+$/.test(s)) return { value: Number(s.replace(/[.,]/g, '')), odd: false };
+    if (/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(s)) return { value: Number(s.replace(/,/g, '')), odd: false };
+    if (/^\d+(\.\d+)?$/.test(s)) return { value: Number(s), odd: false };
+    if (/^\d+,\d+$/.test(s)) return { value: Number(s.replace(',', '.')), odd: true };
+    const parts = s.split(/[.,]/);
+    if (parts.length > 2) return { value: Number(parts[0] + '.' + parts.slice(1).join('')), odd: true };
+    return { value: NaN, odd: true };
+  }
+
+  function currencyIndex(assets) {
+    const list = [];
+    for (const a of assets) {
+      if (a.deleted) continue;
+      for (const al of [a.name, a.code, ...(a.aliases || [])]) {
+        const n = normText(al).toLowerCase();
+        if (n) list.push([n, a.code]);
+      }
+    }
+    return list.sort((x, y) => y[0].length - x[0].length); // longest alias first ("دینار عراق" before "دینار")
+  }
+  function findCurrency(text, idx) {
+    const t = ' ' + text.toLowerCase() + ' ';
+    for (const [al, code] of idx) if (t.includes(' ' + al + ' ') || t.includes(' ' + al)) return code;
+    return null;
+  }
+  function findCity(text) {
+    if (/(لوی )?(کندهار|قندهار)/.test(text)) return 'کندهار';
+    if (/مزار/.test(text)) return 'مزار شریف';
+    if (/جلال ?آباد|ننگرهار/.test(text)) return 'جلال‌آباد';
+    for (const m of ['کابل', 'هرات', 'قندوز', 'غزنی']) if (text.includes(m)) return m;
+    return null;
+  }
+  const findSettlement = (text) => (/فردای?ی|فردائی/.test(text) ? 'forward' : /نقد/.test(text) ? 'cash' : null);
+  const QUOTE_WORDS = [['افغانی', 'AFN'], ['تومان', 'IRT'], ['دالر', 'USD'], ['دلار', 'USD'], ['کلدار', 'PKR']];
+
+  // Split a Telegram message into rate blocks and extract buy / sell for each.
+  function parseRateMessage(text, { assets, defaultMarket = 'کابل', defaultQuote = 'AFN' }) {
+    const idx = currencyIndex(assets);
+    const lines = String(text || '').split(/\r?\n/).map(normText).filter(Boolean);
+    const blocks = [];
+    let cur = null;
+    for (const line of lines) {
+      const pair = /(\S+(?: (?:عراق|کویت|عربستان|سعودی|پاکستان|ایران))?) به (افغانی|تومان|دالر|دلار|کلدار)/.exec(line);
+      const city = findCity(line);
+      const hasNum = /\d/.test(line);
+      const isHeader = pair || (city && !hasNum && !/خرید|فروش/.test(line));
+      if (isHeader) {
+        if (cur && !cur.pair && pair && cur.lines.every((l) => !/\d/.test(l))) { cur.pair = pair; cur.lines.push(line); if (city) cur.city = city; continue; }
+        cur = { pair, city, lines: [line] }; blocks.push(cur);
+      } else if (cur) cur.lines.push(line);
+      else { cur = { pair: null, city, lines: [line] }; blocks.push(cur); }
+      if (city && !cur.city) cur.city = city;
+    }
+    const items = [];
+    for (const b of blocks) {
+      const body = b.lines.join(' \n ');
+      if (!/\d/.test(body)) continue;
+      const issues = [];
+      let code = null, quote = defaultQuote;
+      if (b.pair) {
+        code = findCurrency(normText(b.pair[1]), idx);
+        quote = (QUOTE_WORDS.find(([w]) => w === b.pair[2]) || [null, defaultQuote])[1];
+      } else code = findCurrency(body, idx);
+      if (code === 'IRR' && quote === 'IRT') code = null;
+      if (!code) issues.push('ارز مشخص نیست');
+      const market = b.city || findCity(body) || defaultMarket;
+      const settlement = findSettlement(body) || 'cash';
+      let buy = null, sell = null, odd = false;
+      const take = (kw) => {
+        const after = new RegExp(`${kw}\\s*:?\\s*(\\d[\\d.,]*\\d|\\d)`).exec(body);
+        const before = new RegExp(`(\\d[\\d.,]*\\d|\\d)\\s*${kw}`).exec(body);
+        const m = after || before;
+        if (!m) return null;
+        const n = parseNum(m[1], quote); if (n.odd) odd = true;
+        return isFinite(n.value) && n.value > 0 ? n.value : null;
+      };
+      buy = take('(?:خرید|buy)');
+      sell = take('(?:فروش|sell)');
+      if (buy == null && sell == null) {
+        const nums = body.match(NUM_RE) || [];
+        issues.push(nums.length ? 'نوع نرخ (خرید یا فروش) مشخص نیست' : 'عدد معتبر یافت نشد');
+        const n = nums.length ? parseNum(nums[0], quote) : null;
+        items.push({ code, quote, market, settlement, buy: null, sell: null, unlabeled: n && isFinite(n.value) ? n.value : null, issues, raw: b.lines.join('\n') });
+        continue;
+      }
+      if (odd) issues.push('قالب عدد غیرعادی است');
+      if (buy != null && sell != null && buy > sell) issues.push('نرخ خرید بیشتر از فروش است');
+      items.push({ code, quote, market, settlement, buy: buy != null ? round(buy) : null, sell: sell != null ? round(sell) : null, issues, raw: b.lines.join('\n') });
+    }
+    return items;
+  }
+
+  // Validate a parsed item against the current rate. Returns a list of issues (empty = safe to apply).
+  function checkAgainstCurrent(S, item, postedAt) {
+    const issues = [];
+    const r = S.one('rates', { key: rateKey(item.code, item.quote, item.market, item.settlement) });
+    if (item.buy != null && item.sell != null && (item.sell - item.buy) / item.buy > RATE_RULES.maxSpread) issues.push(`فاصله خرید و فروش بیش از ${RATE_RULES.maxSpread * 100}٪`);
+    if (r) {
+      for (const side of ['buy', 'sell']) {
+        const prev = r[side], v = item[side];
+        if (prev && v != null && Math.abs(v - prev) / prev > RATE_RULES.maxJump) issues.push(`تغییر ${side === 'buy' ? 'خرید' : 'فروش'} بیش از ${RATE_RULES.maxJump * 100}٪ نسبت به نرخ قبلی`);
+      }
+    }
+    return { issues, current: r, stale: !!(r && postedAt && r.updatedAt && postedAt <= r.updatedAt) };
+  }
+
+  // Write a rate (one or both sides) and append history. kind: auto | manual | reviewed
+  function applyRate(S, ctx, item, { kind, source, sourceRef, at, actorId }) {
+    const key = rateKey(item.code, item.quote, item.market, item.settlement);
+    const asset = S.one('assets', { code: item.code });
+    if (!asset) fail(`ارز ${item.code} تعریف نشده است.`);
+    const r = S.one('rates', { key }) || { key, assetId: asset.id, code: item.code, quote: item.quote, market: item.market, settlement: item.settlement, buy: null, sell: null };
+    const when = at || ctx.now;
+    for (const side of ['buy', 'sell']) {
+      if (item[side] == null) continue;
+      r['prev' + side[0].toUpperCase() + side.slice(1)] = r[side];
+      r[side] = item[side]; r[side + 'At'] = when;
+    }
+    r.updatedAt = when; r.source = source; r.sourceRef = sourceRef || null; r.kind = kind;
+    r.manual = kind === 'manual'; r.currency = item.quote;
+    S.put('rates', r);
+    S.put('rateHistory', { key, assetId: asset.id, at: when, buy: item.buy, sell: item.sell, source, kind, ref: sourceRef || null, by: actorId || null });
+    market(ctx);
+    return r;
+  }
+
+  // Process one Telegram message (idempotent per source + message id).
+  function ingestMessage(S, ctx, source, msg) {
+    const existing = S.one('tgMessages', { sourceId: source.id, msgId: String(msg.msgId) });
+    if (existing) {
+      if (existing.text === msg.text) return { status: 'duplicate' };
+      existing.text = msg.text; existing.status = 'review'; existing.note = 'پیام پس از انتشار ویرایش شده است.'; existing.editedAt = ctx.now;
+      existing.items = parseRateMessage(msg.text, { assets: S.find('assets', {}), defaultMarket: source.defaultMarket, defaultQuote: source.defaultQuote });
+      S.put('tgMessages', existing);
+      notifyAdmins(S, ctx, `پیام ویرایش‌شده در کانال ${source.channel} نیاز به بررسی دارد.`, '#admin-rates-review');
+      return { status: 'review' };
+    }
+    const items = parseRateMessage(msg.text, { assets: S.find('assets', {}), defaultMarket: source.defaultMarket, defaultQuote: source.defaultQuote });
+    const rec = { sourceId: source.id, channel: source.channel, msgId: String(msg.msgId), postedAt: msg.postedAt || ctx.now, fetchedAt: ctx.now, text: String(msg.text || '').slice(0, 4000), items: [], status: 'nodata' };
+    let applied = 0, review = 0, held = 0, stale = 0;
+    for (const it of items) {
+      const out = { ...it, state: 'review' };
+      if (!it.issues.length) {
+        const chk = checkAgainstCurrent(S, it, rec.postedAt);
+        out.issues = chk.issues;
+        if (chk.stale) { out.state = 'stale'; stale++; }
+        else if (chk.current && chk.current.manual) { out.state = 'held'; held++; }
+        else if (!out.issues.length && source.autoApply !== false) {
+          applyRate(S, ctx, it, { kind: 'auto', source: 'telegram:' + source.channel, sourceRef: rec.msgId, at: rec.postedAt });
+          out.state = 'applied'; applied++;
+        } else review++;
+      } else review++;
+      rec.items.push(out);
+    }
+    rec.status = review ? 'review' : applied ? 'applied' : held ? 'held' : stale ? 'stale' : 'nodata';
+    S.put('tgMessages', rec);
+    if (review) notifyAdmins(S, ctx, `پیام کانال ${source.channel} نیاز به بررسی دارد.`, '#admin-rates-review');
+    return { status: rec.status, applied, review };
+  }
+
+  function rateItemFromPayload(S, p) {
+    const asset = p.assetId ? S.get('assets', Number(p.assetId)) : S.one('assets', { code: String(p.code || '').toUpperCase() });
+    if (!asset || asset.deleted) fail('ارز انتخاب‌شده معتبر نیست.');
+    const quote = QUOTES[p.quote] ? p.quote : 'AFN';
+    const marketName = MARKETS.includes(p.market) ? p.market : 'کابل';
+    const settlement = SETTLEMENT[p.settlement] ? p.settlement : 'cash';
+    const buy = p.buy === '' || p.buy == null ? null : num(p.buy, 'نرخ خرید');
+    const sell = p.sell === '' || p.sell == null ? null : num(p.sell, 'نرخ فروش');
+    if (buy == null && sell == null) fail('حداقل یکی از نرخ خرید یا فروش را وارد کنید.');
+    if (buy != null && sell != null && sell < buy) fail('نرخ فروش نمی‌تواند کمتر از نرخ خرید باشد.');
+    return { code: asset.code, quote, market: marketName, settlement, buy, sell };
+  }
+
+  const rateActions = {
+    // Manual entry or correction by an admin; the rate is marked as manually edited.
+    'admin.rate.set'(S, me, p, ctx) {
+      requireAdmin(S, me);
+      const it = rateItemFromPayload(S, p);
+      const r = S.one('rates', { key: rateKey(it.code, it.quote, it.market, it.settlement) });
+      if (it.buy != null && it.sell != null && (it.sell - it.buy) / it.buy > 0.1) fail('فاصله نرخ خرید و فروش بیش از ۱۰٪ است. ارقام را بررسی کنید.');
+      if (r && !p.confirmLarge) {
+        for (const side of ['buy', 'sell']) if (r[side] && it[side] != null && Math.abs(it[side] - r[side]) / r[side] > RATE_GUARD) {
+          fail(`تغییر ${Math.round((Math.abs(it[side] - r[side]) / r[side]) * 100)}٪ نسبت به نرخ قبلی. برای ثبت، تغییر بزرگ را تأیید کنید.`, 'confirm');
+        }
+      }
+      applyRate(S, ctx, it, { kind: 'manual', source: 'manual', at: ctx.now, actorId: me });
+      audit(S, ctx, me, 'admin.rate.set', `rate:${rateKey(it.code, it.quote, it.market, it.settlement)}`, `buy ${it.buy ?? '-'} sell ${it.sell ?? '-'}`);
+      return { ok: true };
+    },
+    // Return a manually edited rate to automatic updates.
+    'admin.rate.auto'(S, me, p, ctx) {
+      requireAdmin(S, me);
+      const r = S.one('rates', { key: String(p.key || '') }) || fail('نرخ یافت نشد.', 'not_found');
+      r.manual = false; S.put('rates', r);
+      audit(S, ctx, me, 'admin.rate.auto', `rate:${r.key}`, '');
+      market(ctx);
+      return { ok: true };
+    },
+    // Hide a rate row (history is kept).
+    'admin.rate.remove'(S, me, p, ctx) {
+      requireAdmin(S, me);
+      const r = S.one('rates', { key: String(p.key || '') }) || fail('نرخ یافت نشد.', 'not_found');
+      r.hidden = !r.hidden; S.put('rates', r);
+      audit(S, ctx, me, 'admin.rate.hide', `rate:${r.key}`, String(r.hidden));
+      market(ctx);
+      return { ok: true };
+    },
+    // Apply (optionally edited) items from a message in the review queue.
+    'admin.message.apply'(S, me, p, ctx) {
+      requireAdmin(S, me);
+      const m = getOr(S, 'tgMessages', p.id, 'پیام یافت نشد.');
+      const items = Array.isArray(p.items) ? p.items : [];
+      if (!items.length) fail('هیچ نرخی برای ثبت انتخاب نشده است.');
+      let n = 0;
+      for (const raw of items) {
+        const it = rateItemFromPayload(S, raw);
+        const r = S.one('rates', { key: rateKey(it.code, it.quote, it.market, it.settlement) });
+        if (r && r.updatedAt && m.postedAt < r.updatedAt && !raw.force) fail(`نرخ جدیدتری برای ${it.code} (${it.market}) ثبت شده است.`, 'conflict');
+        applyRate(S, ctx, it, { kind: 'reviewed', source: 'telegram:' + m.channel, sourceRef: m.msgId, at: m.postedAt, actorId: me });
+        n++;
+      }
+      m.status = 'applied'; m.reviewedBy = me; m.reviewedAt = ctx.now;
+      m.items = (m.items || []).map((x) => ({ ...x, state: x.state === 'applied' ? 'applied' : 'reviewed' }));
+      S.put('tgMessages', m);
+      audit(S, ctx, me, 'admin.message.apply', `msg:${m.channel}/${m.msgId}`, `${n} rate(s)`);
+      return { ok: true, applied: n };
+    },
+    'admin.message.ignore'(S, me, p, ctx) {
+      requireAdmin(S, me);
+      const m = getOr(S, 'tgMessages', p.id, 'پیام یافت نشد.');
+      m.status = 'ignored'; m.reviewedBy = me; m.reviewedAt = ctx.now; S.put('tgMessages', m);
+      audit(S, ctx, me, 'admin.message.ignore', `msg:${m.channel}/${m.msgId}`, '');
+      return { ok: true };
+    },
+    // Fallback when the channel cannot be reached: paste a channel message for parsing.
+    'admin.message.paste'(S, me, p, ctx) {
+      requireAdmin(S, me);
+      const src = p.sourceId ? getOr(S, 'sources', p.sourceId, 'منبع یافت نشد.') : (S.one('sources', {}) || fail('ابتدا یک منبع تعریف کنید.'));
+      const text = str(p.text, 'متن پیام', { max: 4000 });
+      const res = ingestMessage(S, ctx, { ...src, autoApply: false }, { msgId: 'manual-' + ctx.now + '-' + me, text, postedAt: ctx.now });
+      audit(S, ctx, me, 'admin.message.paste', `source:${src.id}`, res.status);
+      return res;
+    },
+    'admin.source.save'(S, me, p, ctx) {
+      requireAdmin(S, me);
+      const channel = str(p.channel, 'نام کانال', { max: 40 }).replace(/^@|^https?:\/\/t\.me\/(s\/)?/i, '').replace(/\/.*$/, '');
+      if (!/^[A-Za-z0-9_]{4,40}$/.test(channel)) fail('نام کانال معتبر نیست.');
+      const data = { type: 'telegram', channel, label: str(p.label, 'عنوان', { required: false, max: 60 }) || channel,
+        defaultMarket: MARKETS.includes(p.defaultMarket) ? p.defaultMarket : 'کابل', defaultQuote: QUOTES[p.defaultQuote] ? p.defaultQuote : 'AFN',
+        autoApply: p.autoApply !== false && p.autoApply !== 'false', enabled: p.enabled !== false && p.enabled !== 'false' };
+      let s = p.id ? S.get('sources', Number(p.id)) : null;
+      const clash = S.one('sources', { channel });
+      if (clash && (!s || clash.id !== s.id)) fail('این کانال قبلاً ثبت شده است.', 'conflict');
+      s = S.put('sources', s ? { ...s, ...data } : { ...data, createdAt: ctx.now });
+      audit(S, ctx, me, 'admin.source.save', `source:${s.id}`, channel);
+      return { sourceId: s.id };
+    },
+    'admin.source.toggle'(S, me, p, ctx) {
+      requireAdmin(S, me);
+      const s = getOr(S, 'sources', p.sourceId, 'منبع یافت نشد.');
+      const field = p.field === 'autoApply' ? 'autoApply' : 'enabled';
+      s[field] = !s[field]; S.put('sources', s);
+      audit(S, ctx, me, 'admin.source.toggle', `source:${s.id}`, `${field}=${s[field]}`);
+      return { ok: true };
+    },
+    'admin.asset.delete'(S, me, p, ctx) {
+      requireAdmin(S, me);
+      const a = getOr(S, 'assets', p.assetId, 'ارز یافت نشد.');
+      if (S.count('orders', { assetId: a.id, status: 'active' })) fail('این ارز سفارش فعال دارد؛ ابتدا آن را غیرفعال کنید.');
+      a.deleted = true; a.active = false; S.put('assets', a);
+      for (const r of S.find('rates', { assetId: a.id })) { r.hidden = true; S.put('rates', r); }
+      audit(S, ctx, me, 'admin.asset.delete', `asset:${a.id}`, a.code);
+      market(ctx);
+      return { ok: true };
+    },
+  };
+
+  // Rate history for one rate key over a period, downsampled for charts.
+  function rateHistory(S, key, { from = 0, to = Infinity, max = 400 } = {}) {
+    const where = { key: String(key) };
+    if (from || to !== Infinity) where.at = { ...(from ? { gte: from } : {}), ...(to !== Infinity ? { lte: to } : {}) };
+    const rows = S.find('rateHistory', where, { order: 'at', limit: 20000 });
+    if (rows.length <= max) return rows.map(({ at, buy, sell, kind, source }) => ({ at, buy, sell, kind, source }));
+    const step = rows.length / max, out = [];
+    for (let i = 0; i < max; i++) { const r = rows[Math.floor(i * step)]; out.push({ at: r.at, buy: r.buy, sell: r.sell, kind: r.kind, source: r.source }); }
+    out.push(rows[rows.length - 1]);
+    return out;
+  }
+  function adminMessages(S, actorId, { status = '', offset = 0 } = {}) {
+    requireAdmin(S, actorId);
+    const where = status ? { status } : {};
+    return { messages: S.find('tgMessages', where, { order: '-id', limit: 30, offset: Math.max(0, Number(offset) || 0) }), total: S.count('tgMessages', where) };
+  }
+  function ensureCurrencies(S) {
+    DEFAULT_CURRENCIES.forEach(([code, name, aliases, popular], i) => {
+      const a = S.one('assets', { code });
+      if (!a) S.put('assets', { code, name, unit: code === 'IRR' || code === 'IRC' ? 'IRT' : code, priceCurrency: 'AFN', kind: 'currency', active: true, aliases, popular, sortOrder: i + 1 });
+      else if (!a.aliases) { a.aliases = aliases; a.popular = a.popular ?? popular; a.sortOrder = a.sortOrder ?? i + 1; S.put('assets', a); }
+    });
+    for (const [code, name, unit, aliases, so] of [['XAU', 'طلا', 'OZ', ['طلا', 'gold'], 30], ['XAG', 'نقره', 'KG', ['نقره', 'silver'], 31]]) {
+      if (!S.one('assets', { code })) S.put('assets', { code, name, unit, priceCurrency: 'USD', kind: 'metal', active: true, aliases, popular: false, sortOrder: so });
+    }
+  }
+  function ensureDefaultSource(S, ctx) {
+    if (!S.one('sources', { channel: 'kabul_dalarr_Toman' })) {
+      S.put('sources', { type: 'telegram', channel: 'kabul_dalarr_Toman', label: 'کانال نرخ دالر و تومان کابل', defaultMarket: 'کابل', defaultQuote: 'AFN', autoApply: true, enabled: true, createdAt: ctx.now });
+    }
+  }
+
+  Object.assign(actions, rateActions);
+
   /* ----- actions that change official data or privileges (host must re-verify the password) ----- */
-  const SENSITIVE = new Set(['admin.rate.set', 'admin.user.setRole', 'admin.asset.save', 'admin.asset.toggle', 'admin.broadcast']);
+  const SENSITIVE = new Set(['admin.rate.set', 'admin.rate.auto', 'admin.rate.remove', 'admin.message.apply', 'admin.user.setRole', 'admin.asset.save', 'admin.asset.toggle', 'admin.asset.delete', 'admin.source.save', 'admin.source.toggle', 'admin.broadcast']);
 
   function dispatch(S, actorId, type, payload, ctx) {
     const fn = actions[type];
@@ -573,9 +908,9 @@
     const isAdmin = !!(me && me.role === 'admin' && me.status === 'approved' && scope === 'admin');
     const member = !!me && me.status === 'approved';
 
-    const assets = S.find('assets', {});
-    const rates = S.find('rates', {});
-    const rateHistory = S.find('rateHistory', {}, { order: '-at', limit: LIMITS.rateHistory }).reverse();
+    const assets = S.find('assets', {}, { order: 'sortOrder' }).filter((a) => isAdmin || !a.deleted);
+    const rates = S.find('rates', {}, { limit: 1000 }).filter((r) => isAdmin || !r.hidden);
+    const rateHistory = [];
     let orders = S.find('orders', { status: 'active' }, { order: '-createdAt', limit: LIMITS.marketOrders });
 
     let deals = [];
@@ -627,6 +962,8 @@
         openReports: S.count('reports', { status: 'open' }),
         audit: S.find('audit', {}, { order: '-id', limit: 200 }),
         auditIntact: cached(S, 'audit', now, 30000, () => verifyAudit(S, 2000)),
+        sources: S.find('sources', {}),
+        reviewCount: S.count('tgMessages', { status: 'review' }),
         period: cached(S, 'period', now, 30000, () => periodStats(S, now)),
       };
       const ids = uniq([...view.admin.reports.flatMap((r) => [r.userId, r.reporterId]), ...view.admin.audit.map((e) => e.actorId)]);
@@ -672,7 +1009,7 @@
   }
 
   /* ---------- demo data ---------- */
-  function seed(S, { now, hashPassword, adminPassword = 'admin123', memberPassword = '123456' }) {
+  function seed(S, { now, hashPassword, adminPassword = 'admin123', memberPassword = '123456', sampleMessages = false }) {
     const ctx = { now };
     const H = 3600e3;
     const mk = (name, phone, company, activity, role = 'member', status = 'approved', province = 'کابل') => S.put('users', {
@@ -688,21 +1025,24 @@
     const u3 = mk('عبدالرحیم رحیمی', '0700000003', 'زرگری رحیمی', 'zargar');
     const u4 = mk('فرید احمدی', '0700000004', 'تجارتی احمدی', 'tajer', 'member', 'approved', 'هرات');
     mk('سمیع‌الله', '0700000005', 'صرافی سمیع', 'saraf', 'member', 'pending', 'بلخ');
+    ensureCurrencies(S);
+    ensureDefaultSource(S, ctx);
     const A = {};
-    [['USD', 'دالر امریکایی', 'USD', 'AFN', 'currency'], ['EUR', 'یورو', 'EUR', 'AFN', 'currency'],
-      ['GBP', 'پوند انگلیس', 'GBP', 'AFN', 'currency'], ['PKR', 'کلدار پاکستانی', 'PKR', 'AFN', 'currency'],
-      ['IRR', 'تومان ایران', 'IRT', 'AFN', 'currency'], ['AED', 'درهم امارات', 'AED', 'AFN', 'currency'],
-      ['XAU', 'طلا', 'OZ', 'USD', 'metal'], ['XAG', 'نقره', 'KG', 'USD', 'metal'],
-    ].forEach(([code, name, unit, priceCurrency, kind]) => { A[code] = S.put('assets', { code, name, unit, priceCurrency, kind, active: true }); });
-    const base = { USD: [65.2, 65.35], EUR: [70.6, 70.9], GBP: [82.4, 82.9], PKR: [0.232, 0.235], IRR: [0.00079, 0.00082], AED: [17.7, 17.85], XAU: [4490, 4510], XAG: [51.5, 52.3] };
-    for (const [code, [b, sl]] of Object.entries(base)) {
-      let last = null;
-      for (let i = 14; i >= 1; i--) {
-        const w = 1 + Math.sin(i * 1.7 + code.length) * 0.006 + (14 - i) * 0.0004;
-        last = S.put('rateHistory', { assetId: A[code].id, at: now - i * 24 * H, buy: round(b * w), sell: round(sl * w) });
-      }
-      S.put('rates', { assetId: A[code].id, buy: b, sell: sl, currency: A[code].priceCurrency, updatedAt: now - 2 * H, prevMid: (last.buy + last.sell) / 2 });
-      S.put('rateHistory', { assetId: A[code].id, at: now - 2 * H, buy: b, sell: sl });
+    for (const a of S.find('assets', {})) A[a.code] = a;
+    if (sampleMessages) {
+      // Real messages captured from the channel, processed through the same parser (demo only).
+      const src = S.one('sources', { channel: 'kabul_dalarr_Toman' });
+      const day = new Date(now); day.setHours(0, 0, 0, 0);
+      const at = (h, m) => Math.min(now, day.getTime() + (h * 60 + m) * 60e3);
+      [[126563, 7, 11, 'چک به افغانی 🇮🇷 🇦🇫 کابل\nخرید 0.27.40 🥏 فروش 0.27.50'],
+        [126564, 7, 14, 'هرات\nدالر به تومان 🇺🇸 🇮🇷\n258.500 🚥 نرخ نـــقـدۍ\n\nهرات\nدالر به تومان 🇺🇸 🇮🇷\n268.700 🚥 نرخفردایی'],
+        [126565, 7, 31, 'دالر به افغانی 🇺🇲 🇦🇫 لوی کندهار\nخرید 64.97 🔺💵🔻 فروش 65.00'],
+        [126566, 7, 48, 'هرات فردایی ⏳ 260,000 خــرید🔵'],
+        [126567, 8, 8, 'دالر به افغانی 🇺🇲 🇦🇫 کندهار🔮\nخرید 65.01 🔺💵🔻 فروش 65.03'],
+        [126569, 8, 9, 'دالر به افغانی 🇺🇲 🇦🇫 کابل\nخرید 64.88 🔺💵🔻 فروش 64.90'],
+        [126570, 8, 26, 'دالر به افغانی 🇺🇲 🇦🇫 کابل\nخرید 64.90 🔺💵🔻 فروش 64.92'],
+        [126571, 8, 46, 'دالر به افغانی 🇺🇲 🇦🇫 کابل\nخرید 64.92 🔺💵🔻 فروش 64.94'],
+      ].forEach(([id, h, m, text]) => ingestMessage(S, { now }, src, { msgId: id, postedAt: at(h, m), text }));
     }
     const ord = (u, side, code, amount, price, note = '', ageH = 1) => S.put('orders', {
       userId: u.id, side, assetId: A[code].id, amount, remaining: amount, minAmount: 0, price, priceCurrency: A[code].priceCurrency,
@@ -733,7 +1073,7 @@
 
   return {
     ACTIVITIES, ORDER_STATUS, DEAL_STATUS, USER_STATUS, PROVINCES, SENSITIVE, RATE_GUARD, EngineError,
-    MemoryStore, matchWhere, register, createAdmin, findByPhone, dispatch, buildView, adminUsers, seed, verifyAudit, sweep, chainHash,
+    MemoryStore, matchWhere, register, createAdmin, findByPhone, parseRateMessage, ingestMessage, rateHistory, adminMessages, ensureCurrencies, ensureDefaultSource, rateKey, MARKETS, QUOTES, SETTLEMENT, dispatch, buildView, adminUsers, seed, verifyAudit, sweep, chainHash,
     actions: Object.keys(actions),
   };
 });

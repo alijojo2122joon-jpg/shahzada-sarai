@@ -601,3 +601,26 @@ textarea.input { min-height: 90px; resize: vertical; }
   .fill-row { gap: 14px; }
   .chips { gap: 8px; }
 }
+
+/* ---------- rates section ---------- */
+.rates-tools { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 6px 22px 10px; }
+.rates-tools .seg { overflow-x: auto; max-width: 100%; }
+.delta-stack { display: flex; flex-direction: column; gap: 2px; }
+.chg.flat { color: var(--ink-3); }
+table.data tbody tr.sel td { background: rgba(59,130,246,.10); }
+table.data tbody tr.sel { box-shadow: var(--out-sm), 0 0 0 2px rgba(59,130,246,.55); }
+table.data tbody tr.dim { opacity: .55; }
+.hist-list { display: flex; flex-direction: column; max-height: 420px; overflow-y: auto; }
+.hist-row { display: grid; grid-template-columns: 1.6fr 1fr 1fr auto; gap: 8px; align-items: center; padding: 8px 2px; border-bottom: 1px solid var(--line); font-size: 13.5px; }
+.chart path.draw { stroke-dasharray: 2400; stroke-dashoffset: 2400; animation: drawLine 1.6s var(--flow) forwards; }
+@keyframes drawLine { to { stroke-dashoffset: 0; } }
+.msg-text { white-space: pre-wrap; font-family: inherit; font-size: 14px; line-height: 1.9; margin: 12px 0; padding: 12px 16px; border-radius: var(--radius-sm); box-shadow: var(--in-sm); direction: rtl; }
+.msg-item { padding: 14px; border-radius: var(--radius-sm); box-shadow: var(--in-sm); }
+.msg-item.done { opacity: .6; }
+.msg-item .issues { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
+.msg-items { display: flex; gap: 6px; flex-wrap: wrap; }
+@media (max-width: 640px) {
+  .rates-tools { padding: 6px 14px 10px; }
+  .hist-row { grid-template-columns: 1.4fr 1fr 1fr; }
+  .hist-row .badge { display: none; }
+}

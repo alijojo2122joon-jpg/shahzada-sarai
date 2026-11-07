@@ -13,8 +13,10 @@ const KINDS = {
   deals: [['status', 'completedAt'], ['orderId', 'status'], ['ownerId', 'updatedAt'], ['requesterId', 'updatedAt'], ['status'], ['updatedAt'], ['createdAt']],
   messages: [['dealId']],
   notifications: [['userId', 'read'], ['userId']],
-  rates: [['assetId']],
-  rateHistory: [['at'], ['assetId', 'at']],
+  rates: [['key'], ['assetId']],
+  rateHistory: [['key', 'at'], ['at']],
+  tgMessages: [['sourceId', 'msgId'], ['status'], ['channel']],
+  sources: [['channel'], ['enabled']],
   reports: [['status'], ['reporterId', 'createdAt']],
   audit: [],
 };

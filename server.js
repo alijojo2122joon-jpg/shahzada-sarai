@@ -60,13 +60,62 @@ if (S.isEmpty()) {
     if (process.env.ADMIN_PHONE && process.env.ADMIN_PASSWORD) {
       S.tx(() => Engine.createAdmin(S, { phone: process.env.ADMIN_PHONE, password: process.env.ADMIN_PASSWORD, now: Date.now() }, { hashPassword }));
     } else console.warn('SEED=0 without ADMIN_PHONE/ADMIN_PASSWORD: no admin account exists.');
-    S.tx(() => { // default tradable assets, no rates
-      for (const [code, name, unit, priceCurrency, kind] of [['USD', 'دالر امریکایی', 'USD', 'AFN', 'currency'], ['EUR', 'یورو', 'EUR', 'AFN', 'currency'], ['GBP', 'پوند انگلیس', 'GBP', 'AFN', 'currency'], ['PKR', 'کلدار پاکستانی', 'PKR', 'AFN', 'currency'], ['IRR', 'تومان ایران', 'IRT', 'AFN', 'currency'], ['AED', 'درهم امارات', 'AED', 'AFN', 'currency'], ['XAU', 'طلا', 'OZ', 'USD', 'metal'], ['XAG', 'نقره', 'KG', 'USD', 'metal']]) S.put('assets', { code, name, unit, priceCurrency, kind, active: true });
-    });
+    S.tx(() => { Engine.ensureCurrencies(S); Engine.ensureDefaultSource(S, { now: Date.now() }); });
   } else {
     S.tx(() => Engine.seed(S, { now: Date.now(), hashPassword, adminPassword: process.env.ADMIN_PASSWORD || 'admin123' }));
   }
 }
+// Idempotent upgrades for existing databases: currency list, default Telegram source, retire legacy rate rows.
+S.tx(() => {
+  Engine.ensureCurrencies(S);
+  Engine.ensureDefaultSource(S, { now: Date.now() });
+  for (const r of S.find('rates', { key: null })) { r.key = 'legacy|' + r.id; r.hidden = true; S.put('rates', r); }
+});
+
+/* ---------- Telegram channel fetcher (public web preview: t.me/s/<channel>) ---------- */
+const decodeHtml = (s) => s.replace(/&nbsp;/g, ' ').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+  .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n))).replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16))).replace(/&amp;/g, '&');
+function parseTelegramHtml(html) {
+  const out = [];
+  for (const part of html.split('tgme_widget_message_wrap').slice(1)) {
+    const post = /data-post="[^"\/]+\/(\d+)"/.exec(part);
+    const txt = /<div class="tgme_widget_message_text[^"]*"[^>]*>([\s\S]*?)<\/div>/.exec(part);
+    if (!post || !txt) continue;
+    const tm = /<time[^>]*datetime="([^"]+)"/.exec(part);
+    const text = decodeHtml(txt[1].replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '')).trim();
+    if (text) out.push({ msgId: post[1], postedAt: tm ? Date.parse(tm[1]) || Date.now() : Date.now(), text });
+  }
+  return out.sort((a, b) => Number(a.msgId) - Number(b.msgId));
+}
+const fetching = new Set();
+async function fetchSource(src) {
+  if (fetching.has(src.id)) return { skipped: true };
+  fetching.add(src.id);
+  const result = { fetched: 0, new: 0, applied: 0, review: 0 };
+  try {
+    const res = await fetch(`https://t.me/s/${encodeURIComponent(src.channel)}`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ShahzadaSaraiRates/1.0)', 'Accept-Language': 'fa,en;q=0.8' }, signal: AbortSignal.timeout(15000) });
+    if (!res.ok) throw new Error(`پاسخ ${res.status} از تلگرام`);
+    const msgs = parseTelegramHtml(await res.text());
+    if (!msgs.length) throw new Error('پیامی در صفحه کانال یافت نشد (ممکن است پیش‌نمایش کانال بسته باشد).');
+    result.fetched = msgs.length;
+    for (const m of msgs) {
+      const ctx = { now: Date.now() };
+      const r = S.tx(() => { const fresh = S.get('sources', src.id); return Engine.ingestMessage(S, ctx, fresh, m); });
+      if (r.status !== 'duplicate') { result.new++; result.applied += r.applied || 0; result.review += r.review || 0; publish(ctx); }
+    }
+    if (result.applied) guestCache.at = 0;
+    S.tx(() => { const x = S.get('sources', src.id); x.lastFetchAt = Date.now(); x.lastError = ''; x.lastOkAt = Date.now(); x.lastMsgId = msgs[msgs.length - 1].msgId; S.put('sources', x); });
+  } catch (e) {
+    result.error = e.message;
+    S.tx(() => { const x = S.get('sources', src.id); if (x) { x.lastFetchAt = Date.now(); x.lastError = String(e.message).slice(0, 200); S.put('sources', x); } });
+  } finally { fetching.delete(src.id); }
+  return result;
+}
+const POLL_MS = Number(process.env.RATE_POLL_SECONDS || 60) * 1000;
+function pollAll() { if (process.env.TELEGRAM_FETCH === '0') return; for (const src of S.find('sources', { enabled: true })) fetchSource(src).catch(() => {}); }
+setTimeout(pollAll, 5000).unref();
+setInterval(pollAll, POLL_MS).unref();
 
 /* ---------- TOTP (RFC 6238) for admin second factor ---------- */
 const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -226,6 +275,18 @@ async function api(req, res, url) {
       clients.set(res, sess.uid); req.on('close', () => clients.delete(res));
       return;
     }
+    if (p === '/api/rates/history') {
+      const key = String(url.searchParams.get('key') || '').slice(0, 80);
+      const day = 864e5, off = 270 * 60e3; // Kabul is UTC+4:30
+      const startOfDay = Math.floor((now + off) / day) * day - off;
+      const periods = { today: [startOfDay, now], yesterday: [startOfDay - day, startOfDay], '7d': [now - 7 * day, now], '30d': [now - 30 * day, now], '90d': [now - 90 * day, now] };
+      const [from, to] = periods[url.searchParams.get('period')] || periods['7d'];
+      return send(req, res, 200, { key, from, to, points: Engine.rateHistory(S, key, { from, to }) });
+    }
+    if (p === '/api/admin/messages') {
+      if (sess.scope !== 'admin' || !sess.uid) throw new Engine.EngineError('دسترسی ندارید.', 'forbidden');
+      return send(req, res, 200, Engine.adminMessages(S, sess.uid, Object.fromEntries(url.searchParams)));
+    }
     if (p === '/api/admin/users') {
       if (sess.scope !== 'admin' || !sess.uid) throw new Engine.EngineError('دسترسی ندارید.', 'forbidden');
       return send(req, res, 200, Engine.adminUsers(S, sess.uid, Object.fromEntries(url.searchParams)));
@@ -315,6 +376,13 @@ async function api(req, res, url) {
     }
   }
 
+  if (p === '/api/admin/source/fetch') {
+    if (sess.scope !== 'admin' || me.role !== 'admin') throw new Engine.EngineError('دسترسی ندارید.', 'forbidden');
+    if (limited('fetch:' + sess.uid, 10, 60e3)) throw tooMany();
+    const src = S.get('sources', Number(body.sourceId)) || (() => { throw new Engine.EngineError('منبع یافت نشد.', 'not_found'); })();
+    return send(req, res, 200, await fetchSource(src));
+  }
+
   if (p === '/api/action') {
     const type = String(body.type || '');
     if (limited('act:' + sess.uid, 60, 60e3)) throw tooMany();
@@ -384,4 +452,4 @@ server.requestTimeout = 30e3;
 if (require.main === module) {
   server.listen(PORT, () => console.log(`Shahzada Sarai → http://localhost:${PORT}  (admin panel: ${ADMIN_PATH})`));
 }
-module.exports = { server, totpAt, b32encode };
+module.exports = { server, totpAt, b32encode, parseTelegramHtml };

@@ -6,7 +6,9 @@ const os = require('node:os');
 const path = require('node:path');
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sarai-'));
 process.env.DB_PATH = path.join(dir, 'test.db');
-const { server, totpAt } = require('../server.js');
+process.env.TELEGRAM_FETCH = '0';
+const { server, totpAt, parseTelegramHtml } = require('../server.js');
+const Engine = require('../shared/engine.js');
 
 function client(base, scope = 'user') {
   let cookie = '';
@@ -114,8 +116,54 @@ function client(base, scope = 'user') {
   assert.equal((await admin.act('admin.rate.set', { assetId: usd.id, buy: 65.4, sell: 65.5 }, 'admin123')).status, 200); pass('rate change with password succeeds');
   assert.equal((await admin.act('admin.rate.set', { assetId: usd.id, buy: 90, sell: 90.2 }, 'admin123')).status, 428); pass('rate jump above 15% needs explicit confirmation');
   assert.equal((await admin.act('admin.rate.set', { assetId: usd.id, buy: 66, sell: 60 }, 'admin123')).status, 400); pass('sell below buy refused');
-  const rate = (await guest.state()).rates.find((x) => x.assetId === usd.id);
+  const rate = (await guest.state()).rates.find((x) => x.key === 'USD|AFN|کابل|cash');
   assert(rate.buy === 65.4 && rate.sell === 65.5); pass('public sees only the verified rate');
+
+  /* --- Telegram rates --- */
+  const html = '<div class="tgme_widget_message_wrap js-widget_message_wrap"><div class="tgme_widget_message" data-post="kabul_dalarr_Toman/126571"><div class="tgme_widget_message_text js-message_text" dir="auto">دالر به افغانی <i class="emoji" style=""><b>🇺🇲</b></i> کابل<br/>خرید 64.92 &#33; فروش 64.94</div><a class="tgme_widget_message_date"><time datetime="2026-11-07T04:16:00+00:00" class="time">08:46</time></a></div></div>';
+  const tm = parseTelegramHtml(html);
+  assert(tm.length === 1 && tm[0].msgId === '126571' && tm[0].text.includes('خرید 64.92') && tm[0].postedAt === Date.parse('2026-11-07T04:16:00Z')); pass('channel page parsed (id, text, time)');
+  {
+    const M = Engine.MemoryStore(); const t0 = Date.now();
+    Engine.ensureCurrencies(M); Engine.ensureDefaultSource(M, { now: t0 });
+    const src = M.one('sources', {});
+    const ing = (id, min, text) => Engine.ingestMessage(M, { now: t0 }, src, { msgId: id, postedAt: t0 + min * 60e3, text });
+    ing(1, 1, 'دالر به افغانی 🇺🇲 🇦🇫 کابل\nخرید 64.88 🔺💵🔻 فروش 64.90');
+    let r = M.one('rates', { key: 'USD|AFN|کابل|cash' });
+    assert(r && r.buy === 64.88 && r.sell === 64.9); pass('buy and sell extracted into separate fields');
+    ing(2, 2, 'دالر به افغانی کابل\nخرید 64.92 فروش 64.94');
+    r = M.one('rates', { key: 'USD|AFN|کابل|cash' });
+    assert(r.prevBuy === 64.88 && r.buy === 64.92 && M.count('rateHistory', {}) === 2); pass('new message replaces rate, keeps history and previous values');
+    assert.equal(ing(2, 2, 'دالر به افغانی کابل\nخرید 64.92 فروش 64.94').status, 'duplicate'); pass('duplicate message ignored');
+    assert.equal(ing(0, -5, 'دالر به افغانی کابل\nخرید 60 فروش 60.1').status, 'stale'); pass('older message never overwrites a newer rate');
+    assert.equal(ing(3, 3, 'دالر به افغانی کابل\nخرید 72 فروش 72.1').status, 'review'); pass('jump above 10% goes to review');
+    assert.equal(ing(4, 4, 'دالر به افغانی کابل\nفروش 64.90 خرید 64.95').status, 'review'); pass('buy above sell (possible swap) goes to review');
+    assert.equal(ing(5, 5, 'هرات\nدالر به تومان\n258.500 نرخ نقدی').status, 'review'); pass('unlabelled rate goes to review (no guessing)');
+    ing(6, 6, 'کلدار به افغانی کابل\nخرید 2.30');
+    r = M.one('rates', { key: 'PKR|AFN|کابل|cash' });
+    assert(r.buy === 2.3 && r.sell === null); pass('buy-only message stores buy only');
+    const it = Engine.parseRateMessage('دالر به تومان هرات\nخرید 258.500 فروش 259.000', { assets: M.find('assets', {}) })[0];
+    assert(it.quote === 'IRT' && it.buy === 258500 && it.sell === 259000); pass('toman thousands separators parsed correctly');
+    const kd = Engine.parseRateMessage('دالر به افغانی 🇺🇲 🇦🇫 لوی کندهار\nخرید 64.97 🔺💵🔻 فروش 65.00', { assets: M.find('assets', {}) })[0];
+    assert(kd.market === 'کندهار' && kd.buy === 64.97 && kd.sell === 65); pass('city detected (Kandahar)');
+  }
+  const paste = await admin.act('admin.message.paste', { text: 'یورو به افغانی کابل\nخرید 70.10 فروش 70.40' });
+  assert.equal(paste.data.result.status, 'review'); pass('pasted message queued for review');
+  const msgs = await admin.call('/api/admin/messages?status=review');
+  const pm = msgs.data.messages[0];
+  assert(pm.items[0].code === 'EUR' && pm.items[0].buy === 70.1); pass('review queue shows parsed values');
+  assert.equal((await admin.act('admin.message.apply', { id: pm.id, items: [pm.items[0]] })).status, 401); pass('applying reviewed rates needs the password');
+  assert.equal((await admin.act('admin.message.apply', { id: pm.id, items: [pm.items[0]] }, 'admin123')).status, 200); pass('admin applies reviewed rate');
+  const eur = (await guest.state()).rates.find((x) => x.key === 'EUR|AFN|کابل|cash');
+  assert(eur && eur.buy === 70.1 && eur.sell === 70.4 && eur.kind === 'reviewed'); pass('reviewed rate published');
+  await admin.act('admin.rate.set', { code: 'EUR', quote: 'AFN', market: 'کابل', settlement: 'cash', sell: 70.5 }, 'admin123');
+  let eur2 = (await guest.state()).rates.find((x) => x.key === 'EUR|AFN|کابل|cash');
+  assert(eur2.manual && eur2.sell === 70.5 && eur2.buy === 70.1); pass('manual edit of one side marked as manual');
+  await admin.act('admin.rate.auto', { key: 'EUR|AFN|کابل|cash' }, 'admin123');
+  assert(!(await guest.state()).rates.find((x) => x.key === 'EUR|AFN|کابل|cash').manual); pass('rate returned to automatic mode');
+  const hist = await guest.call('/api/rates/history?key=' + encodeURIComponent('EUR|AFN|کابل|cash') + '&period=today');
+  assert(hist.data.points.length === 2); pass('history endpoint returns all changes');
+  assert.equal((await admin.act('admin.source.save', { channel: 'https://t.me/another_rates_ch', defaultMarket: 'هرات' }, 'admin123')).status, 200); pass('new Telegram source can be added');
 
   /* --- audit & transport --- */
   adm = await admin.state();
