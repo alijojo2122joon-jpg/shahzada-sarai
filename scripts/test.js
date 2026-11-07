@@ -9,6 +9,7 @@ process.env.DB_PATH = path.join(dir, 'test.db');
 process.env.TELEGRAM_FETCH = '0';
 const { server, totpAt, parseTelegramHtml } = require('../server.js');
 const Engine = require('../shared/engine.js');
+const { DatabaseSync: DatabaseSyncCheck } = require('node:sqlite');
 
 function client(base, scope = 'user') {
   let cookie = '';
@@ -176,6 +177,45 @@ function client(base, scope = 'user') {
   const hist = await guest.call('/api/rates/history?key=' + encodeURIComponent('EUR|AFN|کابل|cash') + '&period=today');
   assert(hist.data.points.length === 2); pass('history endpoint returns all changes');
   assert.equal((await admin.act('admin.source.save', { channel: 'https://t.me/another_rates_ch', defaultMarket: 'هرات' }, 'admin123')).status, 200); pass('new Telegram source can be added');
+
+  /* --- elite: fixing, signatures, status, sessions, anomaly --- */
+  {
+    const M = Engine.MemoryStore(); const t0 = Date.now() - 40 * 60e3;
+    Engine.ensureCurrencies(M); Engine.ensureDefaultSource(M, { now: t0 });
+    const adm = Engine.createAdmin(M, { phone: '0700000998', password: 'x'.repeat(10), now: t0 }, { hashPassword: (x) => x });
+    const src = M.one('sources', {});
+    Engine.ingestMessage(M, { now: t0 }, src, { msgId: 'a0', postedAt: t0, text: 'دالر به افغانی کابل\nخرید 64.90 فروش 64.92' });
+    const m0 = M.one('tgMessages', { msgId: 'a0' });
+    Engine.dispatch(M, adm.id, 'admin.message.apply', { id: m0.id, items: m0.items }, { now: t0, scope: 'admin' });
+    let v = 64.92;
+    for (let i = 1; i <= 25; i++) { v = Math.round((v + (i % 2 ? 0.01 : -0.01)) * 100) / 100; Engine.ingestMessage(M, { now: t0 }, src, { msgId: 'a' + i, postedAt: t0 + i * 60e3, text: `دالر به افغانی کابل\nخرید ${(v - 0.02).toFixed(2)} فروش ${v.toFixed(2)}` }); }
+    const st = Engine.ingestMessage(M, { now: t0 }, src, { msgId: 'a99', postedAt: t0 + 30 * 60e3, text: 'دالر به افغانی کابل\nخرید 65.98 فروش 66.00' });
+    const iss = M.one('tgMessages', { msgId: 'a99' }).items[0].issues.join(' ');
+    assert(st.status === 'review' && iss.includes('آماری')); pass('statistical outlier (5σ) held for review even below the 10% limit');
+  }
+  const fx = await admin.act('admin.fixing.run', {}, 'admin123');
+  assert.equal(fx.status, 200); pass('daily reference rate published');
+  assert.equal((await admin.act('admin.fixing.run', {}, 'admin123')).status, 400); pass('reference rate can be published only once per day');
+  const fl = await guest.call('/api/public/fixings');
+  const fix = fl.data.fixings[0];
+  assert(fix && fix.signature && fix.payload); pass('reference rate is digitally signed (Ed25519)');
+  const ver = await guest.call('/api/public/verify?id=' + fix.id);
+  assert.equal(ver.data.valid, true); pass('signature verifies with the public key');
+  const crypto = require('node:crypto');
+  const pk = crypto.createPublicKey({ key: Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), Buffer.from(fl.data.publicKey, 'base64')]), format: 'der', type: 'spki' });
+  const tampered = fix.payload.replace(/"sell":[0-9.]+/, '"sell":99');
+  assert(crypto.verify(null, Buffer.from(fix.payload), pk, Buffer.from(fix.signature, 'base64')) && !crypto.verify(null, Buffer.from(tampered), pk, Buffer.from(fix.signature, 'base64'))); pass('independent verification works; a changed price fails');
+  assert.throws(() => new DatabaseSyncCheck(process.env.DB_PATH).exec("UPDATE t_fixings SET data = '{}'")); pass('reference rates cannot be altered in the database');
+  const pub = await guest.call('/api/public/rates');
+  assert(crypto.verify(null, Buffer.from(JSON.stringify(pub.data.rates)), pk, Buffer.from(pub.data.signature, 'base64'))); pass('public API snapshot is signed');
+  const stat = await guest.call('/api/public/status');
+  assert(stat.data.status === 'operational' && stat.data.data.auditIntact && Array.isArray(stat.data.sources)); pass('public status endpoint');
+  const ses = await seller.call('/api/sessions');
+  assert(ses.data.sessions.some((x) => x.current)); pass('member sees active sessions');
+  const other = client(base); await other.login('0700000001', '123456');
+  assert.equal((await seller.call('/api/sessions')).data.sessions.length, 2);
+  await seller.call('/api/sessions/revoke', { id: 'others' });
+  assert.equal((await other.state()).me, null); pass('signing out other devices revokes their sessions');
 
   /* --- audit & transport --- */
   adm = await admin.state();

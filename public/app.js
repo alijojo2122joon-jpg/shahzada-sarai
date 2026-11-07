@@ -65,6 +65,11 @@
     totpDisable(code, password) { return this.req('/api/admin/2fa/disable', { code, password }); },
     rateHistory(key, period) { return this.req('/api/rates/history?' + qs({ key, period })); },
     sparks() { return this.req('/api/rates/sparks'); },
+    fixings(params) { return this.req('/api/public/fixings?' + qs(params)); },
+    verify(id) { return this.req('/api/public/verify?id=' + encodeURIComponent(id)); },
+    status() { return this.req('/api/public/status'); },
+    sessions() { return this.req('/api/sessions'); },
+    revokeSession(id) { return this.req('/api/sessions/revoke', { id }); },
     adminMessages(params) { return this.req('/api/admin/messages?' + qs(params)); },
     sourceFetch(sourceId) { return this.req('/api/admin/source/fetch', { sourceId }); },
     subscribe(onMe, onMarket) {
@@ -133,6 +138,10 @@
     },
     adminMessages(params) { return this.wrap(() => E.adminMessages(this.S, this.uid, params)); },
     sparks() { return this.wrap(() => E.sparks(this.S, Date.now())); },
+    fixings(params) { return this.wrap(() => ({ fixings: E.fixingsFor(this.S, params) })); },
+    verify() { return Promise.reject(new ApiError('امضای دیجیتال فقط در نسخه اصلی سایت فعال است.')); },
+    status() { return this.wrap(() => { const lr = this.S.find('rates', {}, { order: '-updatedAt', limit: 1 })[0]; return { status: 'operational', uptimeSec: Math.round(performance.now() / 1000), api: { requests5m: 0, p50ms: null, p95ms: null, errors: 0 }, data: { lastRateAt: lr ? lr.updatedAt : null, historyPoints: this.S.count('rateHistory', {}), fixingsToday: this.S.count('fixings', { date: E.kabulDate(Date.now()) }), auditIntact: E.verifyAudit(this.S, 500) }, sources: this.S.find('sources', {}).map((x) => ({ ...x, lastError: 'دریافت مستقیم فقط در نسخه اصلی' })), signing: null }; }); },
+    sessions() { return Promise.reject(new ApiError('فقط در نسخه اصلی.')); },
     sourceFetch() { return Promise.reject(new ApiError('در نسخه آزمایشی دسترسی به تلگرام ممکن نیست. از «ورود دستی پیام» استفاده کنید.')); },
     subscribe(onMe) {
       window.addEventListener('storage', (e) => {
@@ -154,6 +163,7 @@
     totp: null,
     ratesView: { market: 'کابل', q: '', sort: 'popular', key: null, period: '7d', hist: null, histFor: null, loading: null, chart: 'line', cside: 'sell', stats: null },
     conv: { amount: '1000', from: 'USD', to: 'AFN' }, sparks: {}, sparksAt: 0,
+    ind: { ma: true, ema: false, bb: false, rsi: false }, status: null, sessions: null, fixHist: {},
     adminRates: { msgs: null, status: null, filter: '', loading: false, total: 0 },
   };
   const asset = (id) => view.assets.find((a) => a.id === id) || { code: '?', name: '?', unit: '' };
@@ -342,7 +352,7 @@
     if (ADMIN_MODE) {
       return `<header class="topbar"><div class="topbar-inner">
         <a class="brand" href="#admin"><span class="brand-mark">${ICON.shield}</span><span><b>پنل مدیریت</b><small>سرای شهزاده کابل</small></span></a>
-        <div class="top-actions">${isAdmin() ? bellBtn() : ''}${themeBtn()}${me() ? '<button class="btn btn-light btn-sm" data-act="logout">خروج</button>' : ''}</div>
+        <div class="top-actions">${isAdmin() ? bellBtn() + `<button class="bell" data-act="palette" aria-label="جستجو">${SEARCH}</button>` : ''}${themeBtn()}${me() ? '<button class="btn btn-light btn-sm" data-act="logout">خروج</button>' : ''}</div>
       </div></header>${ui.notifOpen && isAdmin() ? notifDrawer() : ''}`;
     }
     const r = route(), m = me();
@@ -359,7 +369,7 @@
         <div class="top-actions">
           ${m ? `${bellBtn()}<a class="btn btn-light btn-sm me-btn" href="#profile">${esc(m.company || m.name)}</a><button class="btn btn-sm" data-act="logout">خروج</button>`
               : '<a class="btn btn-sm" href="#login">ورود</a><a class="btn btn-primary btn-sm" href="#register">عضویت</a>'}
-          ${themeBtn()}
+          <button class="bell" data-act="palette" aria-label="جستجو">${SEARCH}</button>${themeBtn()}
         </div>
       </div>
       ${tick ? `<div class="ticker"><div class="ticker-track">${tick}${tick}</div></div>` : ''}
@@ -392,7 +402,7 @@
   function footer() {
     if (ADMIN_MODE) return '<footer class="footer">دسترسی به این بخش محدود به مدیران مجاز است. همه عملیات ثبت و نگهداری می‌شود.</footer>';
     return `<footer class="footer">
-      <div class="foot-links"><a href="#about">درباره سامانه</a><a href="#rules">قوانین و مقررات</a><a href="#rates">نرخ رسمی</a><a href="#market">بازار</a></div>
+      <div class="foot-links"><a href="#about">درباره سامانه</a><a href="#rules">قوانین و مقررات</a><a href="#rates">نرخ ارز</a><a href="#market">بازار</a><a href="#status">وضعیت سامانه</a><span class="muted">جستجوی سریع: Ctrl+K</span></div>
       سرای شهزاده کابل — سامانه ثبت پیشنهاد و ارتباط معامله‌گران. پرداخت و تحویل خارج از سامانه و مستقیماً میان طرفین انجام می‌شود.</footer>`;
   }
 
@@ -439,6 +449,7 @@
     if (r === 'login') return pageLogin();
     if (r === 'register') return pageRegister();
     if (r === 'about') return pageAbout();
+    if (r === 'status') return pageStatus();
     if (r === 'rules') return pageRules();
     if (r === 'profile') return needUser() || pageProfile();
     if ((m = /^dashboard(?:-(\w+))?$/.exec(r))) return needUser() || pageDashboard(m[1] || 'overview');
@@ -504,7 +515,7 @@
     const mini = (v, c1, c2, label, color) => `<div class="ring-item"><span class="node" style="color:${color}"></span><div class="mini">${ringSvg(0.15 + 0.8 * (v / mx), 84, 5, c1, c2)}<b class="num" data-count="${v}">${v}</b></div><div class="lbl" style="color:${color}">${label}</div></div>`;
     return `
     ${me() && !approved() ? statusHero(me()) : ''}
-    ${officialBoard({ compact: true })}
+    ${homeHeadline()}
     <section class="hero" style="margin-top:26px">
       <div>
         <h1 style="font-size:24px">وضعیت بازار</h1>
@@ -543,6 +554,34 @@
     return `<div class="chips">${top.map(([aid, n]) => { const a = asset(Number(aid)), p = Math.round((n / act.length) * 100);
       return `<a class="chip-ring" href="#market" data-act="filter-asset" data-id="${aid}"><span class="chip-ring-ico">${ringSvg(p / 100, 40, 3.5, '#22d3ee', '#8b7cf6')}<b>${esc(a.code)}</b></span><span><b>${esc(a.name)}</b><small class="num">${p}٪ پیشنهادها</small></span></a>`; }).join('')}</div>`;
   }
+  function homeHeadline() {
+    const lr = liveRates();
+    const prim = lr.find((r) => r.key === 'USD|AFN|کابل|cash') || lr.find((r) => r.market === 'کابل') || lr[0];
+    loadSparks();
+    if (!prim) return `<section class="card card-pad headline aura"><h2>نرخ ارز</h2><p class="muted" style="margin:0">نرخ‌ها پس از دریافت از منبع رسمی نمایش داده می‌شوند.</p><div style="margin-top:14px">${knobBtn('#rates', 'ترمینال نرخ', ICON.nRates)}</div></section>`;
+    const a = assetByCode(prim.code);
+    const fx = (view.fixings || []).find((f) => f.key === prim.key);
+    const db = delta(prim.buy, prim.prevBuy), ds = delta(prim.sell, prim.prevSell);
+    const pill = (dl) => dl ? `<span class="pill ${dl.d > 0 ? 'up' : dl.d < 0 ? 'down' : ''}">${dl.d > 0 ? '▲' : dl.d < 0 ? '▼' : '■'} ${fmt(Math.abs(dl.d))} · ${Math.abs(dl.p).toFixed(2)}%</span>` : '';
+    const others = sortRows(lr.filter((r) => r.key !== prim.key).map((r) => ({ r, a: assetByCode(r.code) })), 'popular').slice(0, 6);
+    const spk = (ui.sparks || {})[prim.key];
+    return `<section class="headline-wrap">
+      <div class="card headline aura">
+        <div class="hl-top"><span class="asset-ico" style="width:50px;height:50px;font-size:13px">${esc(a.code)}</span><div style="flex:1"><div class="hl-title">${esc(a.name)} به ${esc(quoteLabel(prim.quote))}</div><div class="muted small">بازار ${esc(prim.market)} · ${timeFmt.format(new Date(prim.updatedAt))} · ${ago(prim.updatedAt)}${isStale(prim) ? ' · <span class="badge">قدیمی</span>' : ''}</div></div><span class="live"><i></i><b>زنده</b></span></div>
+        <div class="hl-prices">
+          <div class="hl-side ${flashCls(prim, 'buy')}"><span class="muted">خرید</span><b class="num" style="color:var(--buy)">${prim.buy != null ? fmt(prim.buy) : '—'}</b>${pill(db)}</div>
+          <div class="hl-div"></div>
+          <div class="hl-side ${flashCls(prim, 'sell')}"><span class="muted">فروش</span><b class="num" style="color:var(--sell)">${prim.sell != null ? fmt(prim.sell) : '—'}</b>${pill(ds)}</div>
+        </div>
+        <div class="hl-spark">${spk && spk.length > 1 ? sparkSvg(spk).replace('width="96" height="30"', 'width="100%" height="64" preserveAspectRatio="none"') : ''}</div>
+        <div class="hl-foot">${fx ? `<span class="badge ok">نرخ مرجع امروز: خرید ${fx.buy != null ? fmt(fx.buy) : '—'} · فروش ${fx.sell != null ? fmt(fx.sell) : '—'}</span>` : '<span class="muted small">نرخ مرجع امروز ساعت ۱۶:۰۰ منتشر می‌شود.</span>'}<span class="spacer"></span>${knobBtn('#rates', 'ترمینال نرخ', ICON.nRates)}</div>
+      </div>
+      <div class="mini-rates">${others.map(({ r, a: aa }) => { const dl = delta(r.sell ?? r.buy, r.sell != null ? r.prevSell : r.prevBuy);
+        return `<button class="card mini-rate sheen" data-act="rate-open" data-key="${esc(r.key)}"><div class="row" style="justify-content:space-between"><span class="asset-chip"><span class="asset-ico">${esc(aa.code)}</span><span>${esc(aa.name)}<div class="muted small" style="font-weight:400">${esc(r.market)}${r.quote !== 'AFN' ? ' · به ' + esc(quoteLabel(r.quote)) : ''}${r.settlement === 'forward' ? ' · فردایی' : ''}</div></span></span>${dl ? `<span class="chg ${dl.d > 0 ? 'up' : dl.d < 0 ? 'down' : 'flat'} small num">${dl.p > 0 ? '+' : ''}${dl.p.toFixed(2)}%</span>` : ''}</div>
+          <div class="row" style="justify-content:space-between;margin-top:10px"><div><span class="muted small">خرید / فروش</span><div class="num mini-px"><b style="color:var(--buy)">${r.buy != null ? fmt(r.buy) : '—'}</b> / <b style="color:var(--sell)">${r.sell != null ? fmt(r.sell) : '—'}</b></div></div>${sparkSvg((ui.sparks || {})[r.key])}</div></button>`; }).join('') || `<div class="card card-pad muted small">نرخ سایر ارزها پس از انتشار در منبع رسمی نمایش داده می‌شود.<div style="margin-top:10px"><a href="#rates">جدول کامل ارزها</a></div></div>`}
+      </div>
+    </section>`;
+  }
   function filteredOrders() {
     const f = ui.filters;
     let os = view.orders.filter((o) => o.status === 'active');
@@ -568,6 +607,7 @@
           <div><span class="small muted">بالاترین خرید</span><div class="num" style="color:var(--buy);font-weight:800">${b.bid != null ? fmt(b.bid) : '—'}</div></div>
           <div><span class="small muted">پایین‌ترین فروش</span><div class="num" style="color:var(--sell);font-weight:800">${b.ask != null ? fmt(b.ask) : '—'}</div></div>
         </div></div>`).join('')}</div>` : ''}
+    ${tapeAndPressure()}
     ${f.asset ? depthPanel(Number(f.asset)) : ''}
     <div class="card">
       <div class="filters">
@@ -965,6 +1005,7 @@
           <input class="input" type="password" name="current" placeholder="رمز فعلی" required autocomplete="current-password">
           <input class="input" type="password" name="next" placeholder="رمز جدید (حداقل ۸ حرف)" required autocomplete="new-password">
           <button class="btn">تغییر رمز</button></form>
+        ${sessionsCard()}
       </aside>
     </div>`;
   }
@@ -1037,7 +1078,7 @@
     rows = [...rows.filter((x) => x.r && wl.includes(x.r.key)), ...rows.filter((x) => !(x.r && wl.includes(x.r.key)))];
     loadSparks();
     const last = liveRates().filter((r) => r.market === mk).reduce((m, r) => Math.max(m, r.updatedAt || 0), 0);
-    return `<section class="card official glow aura">
+    return `<section class="card official ${compact ? 'glow aura' : 'terminal-board'}">
       <div class="official-head">
         <div><span class="seal">${ICON.seal}</span></div>
         <div style="flex:1"><h2>نرخ ارز — بازار ${esc(mk)}</h2><div class="muted small">${longDate.format(new Date())}</div></div>
@@ -1049,11 +1090,11 @@
         <select class="input" data-rates="sort" style="width:auto">${[['popular', 'پرمعامله‌ها'], ['name', 'نام ارز'], ['up', 'بیشترین افزایش'], ['down', 'بیشترین کاهش']].map(([v, l]) => `<option value="${v}" ${rv.sort === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
       </div>`}
       <div class="table-wrap"><table class="data responsive official-table"><thead><tr><th>ارز</th><th>نماد</th><th>قیمت خرید</th><th>قیمت فروش</th><th>تغییرات</th><th>روند ۷ روز</th><th>آخرین به‌روزرسانی</th></tr></thead><tbody>
-        ${rows.map(({ r, a }) => `<tr class="clickable ${r ? '' : 'norate'} ${r && rv.key === r.key && !compact ? 'sel' : ''}" ${r ? `data-act="rate-open" data-key="${esc(r.key)}"` : ''}>
+        ${rows.map(({ r, a }) => !r ? `<tr class="norate"><td class="cell-main" colspan="7"><div class="row">${assetChip(a)}<span class="spacer"></span><span class="muted small">نرخ معتبر منتشر نشده</span></div></td></tr>` : `<tr class="clickable ${rv.key === r.key && !compact ? 'sel' : ''}" data-act="rate-open" data-key="${esc(r.key)}">
           <td class="cell-main">${r ? `<button class="star ${wl.includes(r.key) ? 'on' : ''}" data-act="watch" data-key="${esc(r.key)}" aria-label="فهرست منتخب">★</button>` : ''}${assetChip(a)}</td>
           <td data-l="نماد"><b class="ltr">${esc(a.code)}</b><div class="muted small">به ${esc(quoteLabel(r ? r.quote : 'AFN'))}${r && r.settlement === 'forward' ? ' · <span class="badge warn">فردایی</span>' : ''}</div></td>
-          <td data-l="قیمت خرید" class="${flashCls(r, 'buy')}">${r && r.buy != null ? `<b class="num price" style="color:var(--buy)">${fmt(r.buy)}</b>` : '<span class="muted small">بدون نرخ معتبر</span>'}</td>
-          <td data-l="قیمت فروش" class="${flashCls(r, 'sell')}">${r && r.sell != null ? `<b class="num price" style="color:var(--sell)">${fmt(r.sell)}</b>` : '<span class="muted small">بدون نرخ معتبر</span>'}</td>
+          <td data-l="قیمت خرید" class="${flashCls(r, 'buy')}">${r && r.buy != null ? `<b class="num price" style="color:var(--buy)">${fmt(r.buy)}</b>` : '<span class="muted" title="نرخ معتبر منتشر نشده">—</span>'}</td>
+          <td data-l="قیمت فروش" class="${flashCls(r, 'sell')}">${r && r.sell != null ? `<b class="num price" style="color:var(--sell)">${fmt(r.sell)}</b>` : '<span class="muted" title="نرخ معتبر منتشر نشده">—</span>'}</td>
           <td data-l="تغییرات"><div class="delta-stack">${r ? deltaCell('خرید', delta(r.buy, r.prevBuy)) + deltaCell('فروش', delta(r.sell, r.prevSell)) : '<span class="muted small">—</span>'}</div></td>
           <td data-l="روند ۷ روز">${r ? sparkSvg((ui.sparks || {})[r.key]) : ''}</td>
           <td data-l="آخرین به‌روزرسانی">${r ? `${rateTime(r)}<div style="margin-top:3px">${sourceBadge(r)}${isStale(r) ? ' <span class="badge">قدیمی</span>' : ''}</div>` : '<span class="muted small">منتشر نشده</span>'}</td></tr>`).join('') || `<tr><td colspan="7">${emptyBox('نرخی مطابق جستجو یافت نشد.')}</td></tr>`}
@@ -1100,31 +1141,51 @@
     const r = view.rates.find((x) => x.key === rv.key);
     if (!r) return '';
     if (rv.histFor !== rv.key + '|' + rv.period && rv.loading !== rv.key + '|' + rv.period) loadHistory();
+    if (!ui.fixHist[r.key]) { ui.fixHist[r.key] = 'loading'; backend.fixings({ key: r.key }).then((x) => { ui.fixHist[r.key] = x.fixings || []; render(); }).catch(() => { ui.fixHist[r.key] = []; }); }
     const a = assetByCode(r.code);
     const pts = rv.histFor === rv.key + '|' + rv.period ? rv.hist || [] : null;
-    const rowsDesc = pts ? pts.slice().reverse().slice(0, 60) : [];
-    return `<section class="split" style="margin-top:24px" id="rate-history">
-      <div class="card card-pad">
-        <div class="row"><h2 style="margin:0">تاریخچه ${esc(a.name)} <span class="muted small">(${esc(r.market)} · به ${esc(quoteLabel(r.quote))}${r.settlement === 'forward' ? ' · فردایی' : ''})</span></h2><span class="spacer"></span>
-          <span class="small"><span style="color:var(--buy)">━ خرید</span> &nbsp; <span style="color:var(--blue-2)">━ فروش</span></span></div>
+    const rowsDesc = pts ? pts.slice().reverse().slice(0, 40) : [];
+    const vol = pts ? volatility(pts) : null;
+    const ind = ui.ind;
+    const fh = Array.isArray(ui.fixHist[r.key]) ? ui.fixHist[r.key] : [];
+    return `<div class="stack" id="rate-history">
+      <div class="card card-pad detail-head">
+        <div class="row"><span class="asset-ico" style="width:46px;height:46px">${esc(a.code)}</span><div style="flex:1"><h2 style="margin:0">${esc(a.name)}</h2><div class="muted small">${esc(r.market)} · به ${esc(quoteLabel(r.quote))}${r.settlement === 'forward' ? ' · فردایی' : ''} · ${sourceBadge(r)}</div></div>
+          <button class="star ${watch.get().includes(r.key) ? 'on' : ''}" data-act="watch" data-key="${esc(r.key)}" style="font-size:22px">★</button></div>
+        <div class="dh-prices"><div><span class="muted small">خرید</span><b class="num" style="color:var(--buy)">${r.buy != null ? fmt(r.buy) : '—'}</b></div><div><span class="muted small">فروش</span><b class="num" style="color:var(--sell)">${r.sell != null ? fmt(r.sell) : '—'}</b></div>${vol != null ? `<div><span class="muted small">نوسان دوره</span><b class="num">${vol.toFixed(3)}%</b></div>` : ''}</div>
         ${pts ? statsStrip(rv.stats, r) : ''}
-        <div class="row" style="margin:16px 0 8px;gap:10px">
+      </div>
+      <div class="card card-pad">
+        <div class="row" style="gap:8px;flex-wrap:wrap">
           <div class="seg">${PERIODS.map(([k, l]) => `<button class="${rv.period === k ? 'on' : ''}" data-act="rates-period" data-v="${k}">${l}</button>`).join('')}</div>
           <div class="seg"><button class="${rv.chart === 'line' ? 'on' : ''}" data-act="chart-mode" data-v="line">خطی</button><button class="${rv.chart === 'candle' ? 'on' : ''}" data-act="chart-mode" data-v="candle">شمعی</button></div>
-          ${rv.chart === 'candle' ? `<div class="seg"><button class="${rv.cside === 'sell' ? 'on' : ''}" data-act="chart-side" data-v="sell">فروش</button><button class="${rv.cside === 'buy' ? 'on' : ''}" data-act="chart-side" data-v="buy">خرید</button></div>` : ''}
-          <span class="spacer"></span>${backend.mode === 'server' ? `<a class="btn btn-sm" href="/api/rates/history?${qs({ key: rv.key, period: rv.period, format: 'csv' })}">دریافت CSV</a>` : ''}
         </div>
-        <div class="chart">${pts ? (rv.chart === 'candle' ? candleChart(pts, { today: 3600e3, yesterday: 3600e3, '7d': 4 * 3600e3, '30d': 864e5, '90d': 864e5 }[rv.period], rv.cside) : lineChartX(pts)) : '<div class="empty">در حال دریافت…</div>'}</div>
+        <div class="row" style="gap:6px;margin-top:10px;flex-wrap:wrap">
+          ${rv.chart === 'line' ? [['ma', 'میانگین متحرک', '#ffb34d'], ['ema', 'EMA', '#ec4899'], ['bb', 'بولینگر', '#8b7cf6'], ['rsi', 'RSI', '#f5b84b']].map(([k, l, c]) => `<button class="ind ${ind[k] ? 'on' : ''}" data-act="ind" data-v="${k}" style="--c:${c}">${l}</button>`).join('')
+            : `<div class="seg"><button class="${rv.cside === 'sell' ? 'on' : ''}" data-act="chart-side" data-v="sell">فروش</button><button class="${rv.cside === 'buy' ? 'on' : ''}" data-act="chart-side" data-v="buy">خرید</button></div>`}
+          <span class="spacer"></span>${backend.mode === 'server' ? `<a class="btn btn-sm" href="/api/rates/history?${qs({ key: rv.key, period: rv.period, format: 'csv' })}">CSV</a>` : ''}
+        </div>
+        <div class="chart" style="margin-top:10px">${pts ? (rv.chart === 'candle' ? candleChart(pts, { today: 3600e3, yesterday: 3600e3, '7d': 4 * 3600e3, '30d': 864e5, '90d': 864e5 }[rv.period], rv.cside) : proLine(pts, ind)) : '<div class="empty">در حال دریافت…</div>'}</div>
+        <div class="small legend"><span style="color:var(--buy)">━ خرید</span><span style="color:var(--blue-2)">━ فروش</span>${rv.chart === 'line' && ind.ma ? '<span style="color:#ffb34d">┅ میانگین</span>' : ''}${rv.chart === 'line' && ind.ema ? '<span style="color:#ec4899">━ EMA</span>' : ''}${rv.chart === 'line' && ind.bb ? '<span style="color:#8b7cf6">▭ بولینگر</span>' : ''}</div>
       </div>
-      <aside class="stack">${alertsBox(r)}<div class="card card-pad"><h3>نرخ‌های ثبت‌شده</h3>
-        ${pts ? (rowsDesc.length ? `<div class="hist-list" style="max-height:300px">${rowsDesc.map((p) => `<div class="hist-row"><span class="small muted">${fmtDate(p.at)}</span><span class="num" style="color:var(--buy)">${p.buy != null ? fmt(p.buy) : '—'}</span><span class="num" style="color:var(--sell)">${p.sell != null ? fmt(p.sell) : '—'}</span><span class="badge ${p.kind === 'manual' ? 'warn' : ''}">${KIND_LABEL[p.kind] || ''}</span></div>`).join('')}</div>` : '<p class="muted small">در این بازه نرخی ثبت نشده است.</p>') : ''}
-      </div></aside>
-    </section>`;
+      ${alertsBox(r)}
+      ${fh.length ? `<div class="card card-pad"><h3>نرخ مرجع روزهای گذشته</h3><div class="hist-list" style="max-height:220px">${fh.map((f) => `<div class="hist-row"><span class="small">${esc(f.date)}</span><span class="num" style="color:var(--buy)">${f.buy != null ? fmt(f.buy) : '—'}</span><span class="num" style="color:var(--sell)">${f.sell != null ? fmt(f.sell) : '—'}</span>${f.signature ? `<button class="btn btn-ghost btn-sm" data-act="verify" data-id="${f.id}">تأیید</button>` : '<span></span>'}</div>`).join('')}</div></div>` : ''}
+      <div class="card card-pad"><h3>نرخ‌های ثبت‌شده</h3>
+        ${pts ? (rowsDesc.length ? `<div class="hist-list" style="max-height:260px">${rowsDesc.map((p) => `<div class="hist-row"><span class="small muted">${fmtDate(p.at)}</span><span class="num" style="color:var(--buy)">${p.buy != null ? fmt(p.buy) : '—'}</span><span class="num" style="color:var(--sell)">${p.sell != null ? fmt(p.sell) : '—'}</span><span class="badge ${p.kind === 'manual' ? 'warn' : ''}">${KIND_LABEL[p.kind] || ''}</span></div>`).join('')}</div>` : '<p class="muted small">در این بازه نرخی ثبت نشده است.</p>') : ''}
+      </div>
+    </div>`;
   }
   function pageRates() {
     const rv = ui.ratesView;
     if (!rv.key) { const first = sortRows(rateRows(rv.market), 'popular').find((x) => x.r); if (first) rv.key = first.r.key; }
-    return `${marketBar()}${officialBoard()}${rv.key ? historyPanel() : ''}<div class="grid g2" style="margin-top:24px">${converter()}${crossMatrix()}</div>${heatmap()}`;
+    return `<div class="terminal-head"><div><h1>ترمینال نرخ ارز</h1><p class="muted">نرخ‌های زنده، نرخ مرجع، تحلیل و ابزار معامله‌گر</p></div><button class="btn btn-sm" data-act="palette">${SEARCH} جستجوی سریع <span class="kbd">Ctrl K</span></button></div>
+      ${marketBar()}
+      <div class="terminal">
+        <div class="t-main">${officialBoard()}</div>
+        <aside class="t-side">${rv.key ? historyPanel() : '<div class="card card-pad muted">یک ارز را از جدول انتخاب کنید.</div>'}</aside>
+      </div>
+      <div class="grid g2" style="margin-top:24px">${fixingCard()}${converter()}</div>
+      <div class="grid g2" style="margin-top:24px">${crossMatrix() || ''}${heatmap().replace('style="margin-top:22px"', '')}</div>`;
   }
 
   /* ---------- admin: rates, review queue, messages, sources ---------- */
@@ -1158,7 +1219,7 @@
     let body = '';
     if (sub === 'list') {
       const rows = view.rates.filter((r) => r.key && !r.key.startsWith('legacy|')).sort((x, y) => x.market.localeCompare(y.market, 'fa') || (assetByCode(x.code).sortOrder || 99) - (assetByCode(y.code).sortOrder || 99));
-      body = `<div class="row" style="margin-bottom:16px"><div class="notice small" style="flex:1">نرخ‌ها به‌طور خودکار از منابع تلگرام دریافت می‌شوند. ویرایش دستی، نرخ را «دستی» علامت‌گذاری می‌کند و تا بازگشت به حالت خودکار، پیام‌های جدید آن را تغییر نمی‌دهند.</div><button class="btn btn-primary" data-act="rate-new">ثبت نرخ دستی</button></div>
+      body = `<div class="row" style="margin-bottom:16px"><div class="notice small" style="flex:1">نرخ‌ها به‌طور خودکار از منابع تلگرام دریافت می‌شوند. ویرایش دستی، نرخ را «دستی» علامت‌گذاری می‌کند و تا بازگشت به حالت خودکار، پیام‌های جدید آن را تغییر نمی‌دهند.</div><button class="btn" data-act="fixing-run">انتشار نرخ مرجع امروز</button><button class="btn btn-primary" data-act="rate-new">ثبت نرخ دستی</button></div>
         <div class="card"><div class="table-wrap"><table class="data responsive"><thead><tr><th>ارز</th><th>بازار</th><th>خرید</th><th>فروش</th><th>منبع</th><th>زمان</th><th></th></tr></thead><tbody>
         ${rows.map((r) => `<tr class="${r.hidden ? 'dim' : ''}"><td class="cell-main">${assetChip(assetByCode(r.code), `به ${esc(quoteLabel(r.quote))}`)}</td>
           <td data-l="بازار">${esc(r.market)}${r.settlement === 'forward' ? ' <span class="badge warn">فردایی</span>' : ''}${r.hidden ? ' <span class="badge">مخفی</span>' : ''}</td>
@@ -1441,6 +1502,186 @@
       </div></section>`;
   }
 
+  /* =========================================================
+     Elite tools: reference rate, signature verification, indicators,
+     trade tape, status page, command palette, sessions
+     ========================================================= */
+  // ---- Daily reference rate (fixing) ----
+  function fixingCard() {
+    const fx = view.fixings || [];
+    if (!fx.length) return `<section class="card card-pad fixing"><div class="row"><span class="seal">${ICON.seal}</span><div><h2 style="margin:0">نرخ مرجع روزانه</h2><div class="muted small">هر روز ساعت ۱۶:۰۰ کابل از میانه نرخ‌های منتشرشده محاسبه، قفل و امضای دیجیتال می‌شود.</div></div></div><p class="muted small" style="margin:12px 0 0">نرخ مرجع امروز هنوز منتشر نشده است.</p></section>`;
+    const date = fx[0].date;
+    return `<section class="card card-pad fixing aura">
+      <div class="row"><span class="seal">${ICON.seal}</span><div style="flex:1"><h2 style="margin:0">نرخ مرجع روزانه سرای شهزاده</h2>
+        <div class="muted small">${longDate.format(new Date(date + 'T12:00:00Z'))} · میانه نرخ‌های منتشرشده · غیرقابل تغییر${fx[0].signature ? ' · امضای دیجیتال Ed25519' : ''}</div></div></div>
+      <div class="fix-grid">${fx.map((f) => `<div class="fix-tile">
+        <div class="row" style="justify-content:space-between"><b class="ltr">${esc(f.code)}</b><span class="muted small">${esc(assetByCode(f.code).name)}${f.settlement === 'forward' ? ' · فردایی' : ''}</span></div>
+        <div class="fix-vals"><div><span class="muted small">خرید</span><b class="num" style="color:var(--buy)">${f.buy != null ? fmt(f.buy) : '—'}</b></div><div><span class="muted small">فروش</span><b class="num" style="color:var(--sell)">${f.sell != null ? fmt(f.sell) : '—'}</b></div></div>
+        <div class="row small muted" style="justify-content:space-between"><span>${f.samples} نمونه</span>${f.signature ? `<button class="btn btn-ghost btn-sm" data-act="verify" data-id="${f.id}">✓ تأیید اصالت</button>` : '<span>بدون امضا (نسخه آزمایشی)</span>'}</div>
+      </div>`).join('')}</div></section>`;
+  }
+  const b64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+  async function verifyInBrowser(payload, sig, pub) {
+    try {
+      const key = await crypto.subtle.importKey('raw', b64(pub), { name: 'Ed25519' }, false, ['verify']);
+      return await crypto.subtle.verify({ name: 'Ed25519' }, key, b64(sig), new TextEncoder().encode(payload));
+    } catch { return null; } // browser without Ed25519 support
+  }
+  async function openVerify(id) {
+    modal('تأیید اصالت نرخ مرجع', '<div class="empty">در حال بررسی امضا…</div>');
+    try {
+      const r = await backend.verify(id);
+      const local = r.signature ? await verifyInBrowser(r.payload, r.signature, r.publicKey) : null;
+      const ok = r.valid && local !== false;
+      const pretty = (() => { try { return JSON.stringify(JSON.parse(r.payload), null, 2); } catch { return r.payload; } })();
+      modal('تأیید اصالت نرخ مرجع', `<div class="verify ${ok ? 'ok' : 'bad'}"><span class="verify-ico">${ok ? '✓' : '✕'}</span><div><b>${ok ? 'امضا معتبر است' : 'امضا معتبر نیست'}</b><div class="small muted">${ok ? 'این نرخ دقیقاً همان است که سرای شهزاده منتشر کرده و پس از انتشار تغییر نکرده است.' : 'داده با امضای ناشر مطابقت ندارد.'}</div></div></div>
+        <dl class="kv" style="margin-top:14px"><dt>بررسی سرور</dt><dd>${r.valid ? 'معتبر' : 'نامعتبر'}</dd><dt>بررسی مستقل مرورگر</dt><dd>${local === null ? 'مرورگر از Ed25519 پشتیبانی نمی‌کند' : local ? 'معتبر' : 'نامعتبر'}</dd><dt>الگوریتم</dt><dd class="ltr">Ed25519</dd></dl>
+        <label class="field" style="margin-top:12px"><span>داده امضاشده</span><pre class="code">${esc(pretty)}</pre></label>
+        <label class="field"><span>امضا</span><pre class="code">${esc(r.signature || '—')}</pre></label>
+        <label class="field"><span>کلید عمومی ناشر</span><pre class="code">${esc(r.publicKey)}</pre></label>`);
+    } catch (e) { modal('تأیید اصالت نرخ مرجع', `<div class="notice warn">${esc(e.message)}</div>`); }
+  }
+
+  // ---- Technical indicators ----
+  function series(points, side) { const out = []; let last = null; for (const p of points) { if (p[side] != null) last = p[side]; out.push(last); } return out; }
+  const sma = (v, n) => v.map((_, i) => { if (i < n - 1) return null; let s2 = 0, c = 0; for (let j = i - n + 1; j <= i; j++) if (v[j] != null) { s2 += v[j]; c++; } return c ? s2 / c : null; });
+  const ema = (v, n) => { const k = 2 / (n + 1); let e = null; return v.map((x) => { if (x == null) return e; e = e == null ? x : x * k + e * (1 - k); return e; }); };
+  function bollinger(v, n = 20, m = 2) { const mid = sma(v, n); return mid.map((md, i) => { if (md == null) return null; let s2 = 0; for (let j = i - n + 1; j <= i; j++) s2 += (v[j] - md) ** 2; const sd = Math.sqrt(s2 / n); return [md - m * sd, md + m * sd]; }); }
+  function rsi(v, n = 14) { const out = v.map(() => null); let g = 0, l = 0; for (let i = 1; i < v.length; i++) { const d = (v[i] ?? v[i - 1]) - (v[i - 1] ?? v[i]); if (i <= n) { g += Math.max(d, 0); l += Math.max(-d, 0); if (i === n) out[i] = l === 0 ? 100 : 100 - 100 / (1 + g / l); } else { g = (g * (n - 1) + Math.max(d, 0)) / n; l = (l * (n - 1) + Math.max(-d, 0)) / n; out[i] = l === 0 ? 100 : 100 - 100 / (1 + g / l); } } return out; }
+  function volatility(points) { const v = series(points, points.some((p) => p.sell != null) ? 'sell' : 'buy').filter((x) => x != null); if (v.length < 3) return null; const r = []; for (let i = 1; i < v.length; i++) r.push((v[i] - v[i - 1]) / v[i - 1]); const m = r.reduce((a, b) => a + b, 0) / r.length; return Math.sqrt(r.reduce((a, b) => a + (b - m) ** 2, 0) / r.length) * 100; }
+  function proLine(points, ind) {
+    const pts = points.filter((p) => p.buy != null || p.sell != null);
+    if (pts.length < 2) return '<p class="muted small">برای این بازه داده کافی برای نمودار وجود ندارد.</p>';
+    const w = 640, h = 240, pad = 24, padL = 8, iw = w - padL - 70;
+    const buy = series(pts, 'buy'), sell = series(pts, 'sell'), base = sell.some((x) => x != null) ? sell : buy;
+    const ovl = {};
+    if (ind.ma) ovl.ma = sma(base, Math.min(20, Math.max(3, Math.floor(pts.length / 4))));
+    if (ind.ema) ovl.ema = ema(base, 10);
+    if (ind.bb) ovl.bb = bollinger(base, Math.min(20, Math.max(5, Math.floor(pts.length / 3))));
+    const all = [...buy, ...sell, ...(ovl.ma || []), ...(ovl.ema || []), ...((ovl.bb || []).flat())].filter((x) => x != null);
+    let lo = Math.min(...all), hi = Math.max(...all); if (lo === hi) { lo *= 0.999; hi *= 1.001; }
+    const t0 = pts[0].at, t1 = pts[pts.length - 1].at;
+    const X = (i) => padL + ((pts[i].at - t0) / (t1 - t0 || 1)) * iw, Y = (v) => pad + (1 - (v - lo) / (hi - lo)) * (h - pad * 2);
+    const path = (arr) => arr.reduce((d, v, i) => (v == null ? d : d + `${d ? 'L' : 'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}`), '');
+    let bbBand = '';
+    if (ovl.bb) { const up = [], dn = []; ovl.bb.forEach((b, i) => { if (b) { up.push(`${X(i).toFixed(1)},${Y(b[1]).toFixed(1)}`); dn.unshift(`${X(i).toFixed(1)},${Y(b[0]).toFixed(1)}`); } }); if (up.length > 1) bbBand = `<polygon points="${up.concat(dn).join(' ')}" fill="rgba(139,124,246,.13)" stroke="rgba(139,124,246,.5)" stroke-width="1"/>`; }
+    const fmtT = (t) => (t1 - t0 < 2 * 864e5 ? timeFmt : dayFmt).format(new Date(t));
+    chartModel = { kind: 'line', w, padL, iw, items: pts.map((p, i) => ({ x: X(i), at: p.at, buy: buy[i], sell: sell[i] })) };
+    let rsiPanel = '';
+    if (ind.rsi) {
+      const rv = rsi(base, Math.min(14, Math.max(3, Math.floor(pts.length / 3)))), rh = 80, RY = (v) => 8 + (1 - v / 100) * (rh - 16);
+      const d = rv.reduce((acc, v, i) => (v == null ? acc : acc + `${acc ? 'L' : 'M'}${X(i).toFixed(1)},${RY(v).toFixed(1)}`), '');
+      const lastR = rv.filter((x) => x != null).pop();
+      rsiPanel = `<svg viewBox="0 0 ${w} ${rh}" style="direction:ltr;margin-top:6px"><rect x="${padL}" y="${RY(70)}" width="${iw}" height="${RY(30) - RY(70)}" fill="rgba(127,127,127,.08)"/>
+        ${[30, 70].map((v) => `<line x1="${padL}" x2="${padL + iw}" y1="${RY(v)}" y2="${RY(v)}" stroke="rgba(127,127,127,.3)" stroke-dasharray="3 3"/><text x="${w - 64}" y="${RY(v) + 4}" font-size="10" fill="#7a879c">${v}</text>`).join('')}
+        ${d ? `<path class="draw" d="${d}" fill="none" stroke="#f5b84b" stroke-width="1.8"/>` : ''}<text x="${padL + 4}" y="14" font-size="11" fill="#f5b84b">RSI ${lastR != null ? lastR.toFixed(0) : '—'}</text></svg>`;
+    }
+    return `<svg viewBox="0 0 ${w} ${h}" class="xchart" style="direction:ltr">
+      ${[lo, (lo + hi) / 2, hi].map((v) => `<line x1="${padL}" x2="${padL + iw}" y1="${Y(v)}" y2="${Y(v)}" stroke="rgba(127,127,127,.18)" stroke-dasharray="3 4"/><text x="${w - 64}" y="${Y(v) + 4}" font-size="11" fill="#7a879c">${fmt(v, 4)}</text>`).join('')}
+      ${bbBand}
+      <path class="draw" d="${path(buy)}" fill="none" stroke="#2fd389" stroke-width="2.2"/>
+      <path class="draw" d="${path(sell)}" fill="none" stroke="#3b82f6" stroke-width="2.4"/>
+      ${ovl.ma ? `<path class="draw" d="${path(ovl.ma)}" fill="none" stroke="#ffb34d" stroke-width="1.6" stroke-dasharray="5 3"/>` : ''}
+      ${ovl.ema ? `<path class="draw" d="${path(ovl.ema)}" fill="none" stroke="#ec4899" stroke-width="1.6"/>` : ''}
+      ${[0, Math.floor(pts.length / 2), pts.length - 1].map((i) => `<text x="${X(i)}" y="${h - 4}" font-size="11" fill="#7a879c" text-anchor="middle">${fmtT(pts[i].at)}</text>`).join('')}
+    </svg>${rsiPanel}<div class="xtip" style="display:none"></div>`;
+  }
+
+  // ---- Trade tape, VWAP and order-book pressure (market page) ----
+  function tapeAndPressure() {
+    const tape = view.tape || [];
+    const act = view.orders.filter((o) => o.status === 'active');
+    const byAsset = {};
+    for (const o of act) { const k = o.assetId; byAsset[k] = byAsset[k] || { bid: 0, ask: 0 }; byAsset[k][o.side === 'buy' ? 'bid' : 'ask'] += o.remaining * o.price; }
+    const day = Date.now() - 864e5, vw = {};
+    for (const t of tape.filter((x) => x.at >= day)) { vw[t.assetId] = vw[t.assetId] || { pv: 0, v: 0 }; vw[t.assetId].pv += t.price * t.amount; vw[t.assetId].v += t.amount; }
+    const rows = Object.entries(byAsset).slice(0, 6);
+    if (!rows.length && !tape.length) return '';
+    return `<div class="grid g2" style="margin-bottom:22px">
+      <section class="card card-pad"><h2>فشار خرید و فروش</h2><p class="muted small" style="margin-top:-6px">ارزش پیشنهادهای فعال خرید در برابر فروش</p>
+        ${rows.map(([aid, p]) => { const tot = p.bid + p.ask || 1, b = Math.round((p.bid / tot) * 100), a = asset(Number(aid)), v = vw[aid];
+          return `<div class="press"><div class="row small" style="justify-content:space-between"><b>${esc(a.name)}</b>${v ? `<span class="muted">VWAP ۲۴ ساعت: <b class="num">${fmt(v.pv / v.v)}</b></span>` : ''}</div>
+            <div class="press-bar"><i class="b" style="width:${b}%"></i><i class="s" style="width:${100 - b}%"></i></div>
+            <div class="row small" style="justify-content:space-between"><span style="color:var(--buy)">خرید ${b}%</span><span style="color:var(--sell)">فروش ${100 - b}%</span></div></div>`; }).join('') || '<p class="muted small">پیشنهاد فعالی نیست.</p>'}
+      </section>
+      <section class="card card-pad"><h2>معاملات اخیر</h2><p class="muted small" style="margin-top:-6px">معاملات تأییدشده میان اعضا (بدون نام)</p>
+        ${tape.length ? `<div class="tape"><div class="tape-head"><span>زمان</span><span>دارایی</span><span>مقدار</span><span>نرخ</span></div>${tape.slice(0, 12).map((t) => `<div class="tape-row ${t.side}"><span class="small muted">${timeFmt.format(new Date(t.at))}</span><span>${esc(asset(t.assetId).code)} ${t.done ? '<span class="badge ok">تکمیل</span>' : ''}</span><span class="num">${fmt(t.amount)}</span><span class="num price">${fmt(t.price)}</span></div>`).join('')}</div>` : '<p class="muted small">معامله‌ای ثبت نشده است.</p>'}
+      </section></div>`;
+  }
+
+  // ---- Public status page ----
+  async function loadStatus() { ui.statusAt = Date.now(); try { ui.status = await backend.status(); } catch (e) { ui.status = { error: e.message }; } if (route() === 'status') render(); }
+  function pageStatus() {
+    if (!ui.status || Date.now() - (ui.statusAt || 0) > 30e3) loadStatus();
+    const st = ui.status;
+    if (!st) return '<div class="empty">در حال دریافت وضعیت…</div>';
+    if (st.error) return gate(esc(st.error));
+    const fresh = st.data.lastRateAt && Date.now() - st.data.lastRateAt < STALE_MS;
+    const up = (sec) => { const d = Math.floor(sec / 86400), hh = Math.floor((sec % 86400) / 3600), mm = Math.floor((sec % 3600) / 60); return `${d ? d + ' روز ' : ''}${hh} ساعت ${mm} دقیقه`; };
+    const comp = (name, ok, detail) => `<div class="comp"><span class="comp-dot ${ok === true ? 'ok' : ok === false ? 'bad' : 'warn'}"></span><b>${name}</b><span class="spacer"></span><span class="muted small">${detail}</span></div>`;
+    return `${pageHead('وضعیت سامانه', `به‌روزرسانی ${timeFmt.format(new Date())}`)}
+      <section class="card card-pad status-hero ${st.status === 'operational' ? 'ok' : 'bad'} aura"><span class="pulse-dot"></span><div><h2 style="margin:0">${st.status === 'operational' ? 'همه سرویس‌ها فعال هستند' : 'اختلال در سرویس'}</h2><div class="muted small">زمان فعالیت پیوسته: ${up(st.uptimeSec)}</div></div></section>
+      <div class="grid g4" style="margin:22px 0">
+        <div class="card tile sheen"><span>درخواست‌ها (۵ دقیقه)</span><b class="num">${st.api.requests5m}</b></div>
+        <div class="card tile sheen"><span>پاسخ میانه / ۹۵٪</span><b class="num">${st.api.p50ms ?? '—'} / ${st.api.p95ms ?? '—'}<small class="muted"> ms</small></b></div>
+        <div class="card tile sheen"><span>آخرین نرخ</span><b>${st.data.lastRateAt ? ago(st.data.lastRateAt) : '—'}</b></div>
+        <div class="card tile sheen"><span>نقاط تاریخچه</span><b class="num">${fmt(st.data.historyPoints)}</b></div>
+      </div>
+      <section class="card card-pad"><h2>اجزای سامانه</h2>
+        ${comp('API و وب‌سایت', true, 'فعال')}
+        ${comp('تازگی نرخ‌ها', fresh, st.data.lastRateAt ? `آخرین نرخ ${ago(st.data.lastRateAt)}` : 'بدون نرخ')}
+        ${comp('نرخ مرجع امروز', st.data.fixingsToday > 0 ? true : null, st.data.fixingsToday > 0 ? `${st.data.fixingsToday} نرخ منتشر شد` : 'ساعت ۱۶:۰۰ منتشر می‌شود')}
+        ${comp('یکپارچگی سابقه عملیات', st.data.auditIntact, st.data.auditIntact ? 'زنجیره هش سالم' : 'ناسازگار')}
+        ${st.sources.map((x) => comp(`منبع تلگرام: ${esc(x.label || x.channel)}`, !x.enabled ? null : !x.lastError, !x.enabled ? 'غیرفعال' : x.lastError ? esc(x.lastError) : `آخرین دریافت ${x.lastOkAt ? ago(x.lastOkAt) : '—'} · موفقیت ${x.fetches ? Math.round(((x.fetches - x.failures) / x.fetches) * 100) : 100}%${x.latencyMs ? ` · ${x.latencyMs} ms` : ''}`)).join('')}
+      </section>
+      ${st.signing ? `<section class="card card-pad" style="margin-top:22px"><h2>امضای دیجیتال</h2><p class="muted small" style="margin-top:-6px">نرخ‌های مرجع و خروجی API عمومی با کلید زیر امضا می‌شوند (${esc(st.signing.algorithm)}).</p><pre class="code">${esc(st.signing.publicKey)}</pre>
+        <p class="muted small" style="margin:8px 0 0">API: <span class="ltr">/api/public/rates</span> · <span class="ltr">/api/public/fixings</span> · <span class="ltr">/api/public/verify?id=</span> · <span class="ltr">/api/public/key</span></p></section>` : ''}`;
+  }
+
+  // ---- Command palette (Ctrl+K) ----
+  function paletteItems() {
+    const items = ADMIN_MODE
+      ? MODULES.map(([k, t]) => ({ label: t, hint: 'پنل مدیریت', href: '#admin-' + k }))
+      : [['home', 'صفحه اصلی'], ['rates', 'نرخ ارز'], ['market', 'بازار'], ['new', 'ثبت سفارش'], ['dashboard', 'داشبورد'], ['profile', 'پروفایل'], ['status', 'وضعیت سامانه'], ['rules', 'قوانین و مقررات'], ['about', 'درباره سامانه']].map(([h, l]) => ({ label: l, hint: 'صفحه', href: '#' + h }));
+    if (!ADMIN_MODE) for (const r of liveRates()) { const a = assetByCode(r.code); items.push({ label: `${a.name} ${r.code}`, hint: `${r.market}${r.settlement === 'forward' ? ' · فردایی' : ''} · خرید ${r.buy != null ? fmt(r.buy) : '—'} · فروش ${r.sell != null ? fmt(r.sell) : '—'}`, key: r.key, terms: (a.aliases || []).join(' ') }); }
+    return items;
+  }
+  function openPalette() {
+    closeModal();
+    const bg = document.createElement('div'); bg.className = 'modal-bg palette-bg';
+    bg.innerHTML = `<div class="palette card"><label class="search-pill">${orb(SEARCH)}<input id="pal-q" placeholder="جستجو: صفحه، ارز، نماد…" autocomplete="off"></label><div class="pal-list" id="pal-list"></div><div class="muted small pal-foot">↑ ↓ انتخاب · Enter باز کردن · Esc بستن</div></div>`;
+    bg.addEventListener('click', (e) => { if (e.target === bg) closeModal(); });
+    document.body.appendChild(bg);
+    const inp = bg.querySelector('#pal-q'), list = bg.querySelector('#pal-list'); let sel = 0, cur = [];
+    const draw = () => {
+      const q = inp.value.trim().toLowerCase();
+      cur = paletteItems().filter((it) => !q || (it.label + ' ' + (it.hint || '') + ' ' + (it.terms || '')).toLowerCase().includes(q)).slice(0, 12);
+      sel = Math.min(sel, Math.max(0, cur.length - 1));
+      list.innerHTML = cur.map((it, i) => `<div class="pal-item ${i === sel ? 'on' : ''}" data-i="${i}"><b>${esc(it.label)}</b><span class="muted small">${esc(it.hint || '')}</span></div>`).join('') || '<div class="muted small" style="padding:14px">موردی یافت نشد.</div>';
+    };
+    const go = (it) => { if (!it) return; closeModal(); if (it.key) { ui.ratesView.key = it.key; const r = view.rates.find((x) => x.key === it.key); if (r) ui.ratesView.market = r.market; if (route() === 'rates') render(); else location.hash = '#rates'; } else location.hash = it.href; };
+    inp.addEventListener('input', () => { sel = 0; draw(); });
+    inp.addEventListener('keydown', (e) => { if (e.key === 'ArrowDown') { sel = Math.min(sel + 1, cur.length - 1); draw(); e.preventDefault(); } else if (e.key === 'ArrowUp') { sel = Math.max(sel - 1, 0); draw(); e.preventDefault(); } else if (e.key === 'Enter') go(cur[sel]); });
+    list.addEventListener('click', (e) => { const el = e.target.closest('.pal-item'); if (el) go(cur[Number(el.dataset.i)]); });
+    draw(); inp.focus();
+  }
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(); }
+    else if (e.key === '/' && !/INPUT|TEXTAREA|SELECT/.test((document.activeElement || {}).tagName || '') && !document.querySelector('.modal-bg')) { e.preventDefault(); openPalette(); }
+  });
+
+  // ---- Active sessions ----
+  async function loadSessions() { ui.sessionsAt = Date.now(); try { ui.sessions = (await backend.sessions()).sessions; } catch (e) { ui.sessions = { error: e.message }; } render(); }
+  function sessionsCard() {
+    if (backend.mode !== 'server') return '';
+    if (!ui.sessions || Date.now() - (ui.sessionsAt || 0) > 60e3) { if (!ui.sessionsLoading) { ui.sessionsLoading = true; loadSessions().finally(() => { ui.sessionsLoading = false; }); } }
+    const list = Array.isArray(ui.sessions) ? ui.sessions : [];
+    const dev = (ua) => /iPhone|iPad/.test(ua) ? 'iPhone / iPad' : /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : /Mac OS/.test(ua) ? 'Mac' : /Linux/.test(ua) ? 'Linux' : 'دستگاه نامشخص';
+    const br = (ua) => /Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : '';
+    return `<div class="card card-pad"><div class="row"><h3 style="margin:0">نشست‌های فعال</h3><span class="spacer"></span>${list.length > 1 ? '<button class="btn btn-sm" data-act="sess-revoke" data-id="others">خروج از همه دستگاه‌های دیگر</button>' : ''}</div>
+      ${list.map((x) => `<div class="sess"><div style="flex:1"><b>${dev(x.ua)} ${br(x.ua)}</b> ${x.current ? '<span class="badge ok">این دستگاه</span>' : ''} ${x.scope === 'admin' ? '<span class="badge blue">پنل مدیریت</span>' : ''}<div class="muted small"><span class="ltr">${esc(x.ip || '')}</span> · ورود ${fmtDate(x.createdAt)} · آخرین فعالیت ${ago(x.lastSeen)}</div></div>${x.current ? '' : `<button class="btn btn-ghost btn-sm" data-act="sess-revoke" data-id="${esc(x.id)}">خروج</button>`}</div>`).join('') || '<p class="muted small">در حال دریافت…</p>'}</div>`;
+  }
+
   /* ---------- static pages ---------- */
   function pageAbout() {
     return `${pageHead('درباره سامانه', '')}<div class="card card-pad stack">
@@ -1617,7 +1858,7 @@
           <input class="input" type="password" name="current" placeholder="رمز فعلی" required autocomplete="current-password">
           <input class="input" type="password" name="next" placeholder="رمز جدید (حداقل ۱۰ حرف، شامل حرف و عدد)" required autocomplete="new-password">
           <p class="muted small" style="margin:0">پس از تغییر، نشست‌های دیگر این حساب بسته می‌شود.</p>
-          <button class="btn">تغییر رمز</button></form></div>`;
+          <button class="btn">تغییر رمز</button></form></div><div style="margin-top:22px">${sessionsCard()}</div>`;
     }
     if (tab === 'audit') {
       return `${moduleHead('audit')}<div class="notice ${A.auditIntact ? '' : 'warn'}" style="margin-bottom:14px">${A.auditIntact ? 'زنجیره سابقه عملیات سالم است؛ هیچ رکوردی تغییر نکرده یا حذف نشده است.' : 'هشدار: ناسازگاری در زنجیره سابقه عملیات.'}</div>
@@ -1742,7 +1983,7 @@
         case 'rate-open': {
           ui.ratesView.key = t.dataset.key;
           if (route() !== 'rates') { const r = view.rates.find((x) => x.key === t.dataset.key); if (r) ui.ratesView.market = r.market; location.hash = '#rates'; }
-          else { render(); const h = document.getElementById('rate-history'); if (h) h.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+          else { render(); const h = document.getElementById('rate-history'); if (h && window.innerWidth < 1060) h.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
           break;
         }
         case 'deal-filter': ui.dealFilter = t.dataset.v; render(); break;
@@ -1797,6 +2038,11 @@
         case 'rates-market': ui.ratesView = { ...ui.ratesView, market: t.dataset.v, key: null }; render(); break;
         case 'rates-period': ui.ratesView.period = t.dataset.v; render(); break;
         case 'chart-mode': ui.ratesView.chart = t.dataset.v; render(); break;
+        case 'ind': ui.ind[t.dataset.v] = !ui.ind[t.dataset.v]; render(); break;
+        case 'verify': openVerify(nid); break;
+        case 'palette': openPalette(); break;
+        case 'sess-revoke': await backend.revokeSession(t.dataset.id); ui.sessions = null; ui.sessionsAt = 0; toast('نشست بسته شد.'); render(); break;
+        case 'fixing-run': sensitive('admin.fixing.run', {}, 'نرخ مرجع امروز منتشر شد.', 'نرخ مرجع امروز از میانه نرخ‌های ثبت‌شده امروز محاسبه، امضا و برای همیشه قفل می‌شود. این کار فقط یک بار در روز ممکن است.'); break;
         case 'chart-side': ui.ratesView.cside = t.dataset.v; render(); break;
         case 'watch': e.stopPropagation(); watch.toggle(t.dataset.key); render(); break;
         case 'conv-swap': { const c = ui.conv; [c.from, c.to] = [c.to, c.from]; render(); break; }

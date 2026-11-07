@@ -647,6 +647,16 @@
         const prev = r[side], v = item[side];
         if (prev && v != null && Math.abs(v - prev) / prev > RATE_RULES.maxJump) issues.push(`تغییر ${side === 'buy' ? 'خرید' : 'فروش'} بیش از ${RATE_RULES.maxJump * 100}٪ نسبت به نرخ قبلی`);
       }
+      // Statistical outlier: move larger than 5 standard deviations of recent moves (and above 1%).
+      const side = item.sell != null ? 'sell' : 'buy';
+      const hist = S.find('rateHistory', { key: r.key }, { order: '-at', limit: 60 }).map((x) => x[side]).filter((x) => x != null).reverse();
+      if (hist.length >= 20 && item[side] != null && r[side]) {
+        const rets = []; for (let i = 1; i < hist.length; i++) rets.push((hist[i] - hist[i - 1]) / hist[i - 1]);
+        const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
+        const sd = Math.sqrt(rets.reduce((a, b) => a + (b - mean) ** 2, 0) / rets.length);
+        const move = (item[side] - r[side]) / r[side];
+        if (sd > 0 && Math.abs(move) > 0.01 && Math.abs(move - mean) / sd > 5) issues.push(`حرکت غیرعادی آماری (${(Math.abs(move - mean) / sd).toFixed(1)} برابر انحراف معیار)`);
+      }
     } else {
       // New instrument: accept only if consistent with the same currency in another city, otherwise ask the admin once.
       const refs = S.find('rates', { code: item.code, quote: item.quote }).filter((x) => !x.hidden && (x.buy != null || x.sell != null));
@@ -843,6 +853,14 @@
       audit(S, ctx, me, 'admin.source.toggle', `source:${s.id}`, `${field}=${s[field]}`);
       return { ok: true };
     },
+    // Publish today's reference rate early (once per day), e.g. on days without a 16:00 run.
+    'admin.fixing.run'(S, me, p, ctx) {
+      requireAdmin(S, me);
+      const r = computeFixings(S, ctx, { force: true, sign: ctx.sign });
+      if (!r.created) fail(r.reason === 'exists' ? 'نرخ مرجع امروز قبلاً منتشر شده است.' : 'برای امروز نرخی در بازار کابل ثبت نشده است.');
+      audit(S, ctx, me, 'admin.fixing.run', `date:${r.date}`, String(r.created));
+      return r;
+    },
     'admin.asset.delete'(S, me, p, ctx) {
       requireAdmin(S, me);
       const a = getOr(S, 'assets', p.assetId, 'ارز یافت نشد.');
@@ -866,6 +884,47 @@
     out.push(rows[rows.length - 1]);
     return out;
   }
+  /* ----- Daily reference rate ("fixing") -----
+     Computed once per Kabul day at 16:00 for every Kabul rate: the median of all buy / sell values
+     published between 08:00 and 16:00. Stored immutably; the host may attach a digital signature. */
+  const KABUL_OFF = 270 * 60e3, DAY = 864e5;
+  const kabulDate = (t) => new Date(t + KABUL_OFF).toISOString().slice(0, 10);
+  const kabulStartOfDay = (t) => Math.floor((t + KABUL_OFF) / DAY) * DAY - KABUL_OFF;
+  const median = (a) => { if (!a.length) return null; const s2 = a.slice().sort((x, y) => x - y), m = s2.length >> 1; return round(s2.length % 2 ? s2[m] : (s2[m - 1] + s2[m]) / 2); };
+  function fixingPayload(f) { return JSON.stringify({ date: f.date, key: f.key, code: f.code, quote: f.quote, market: f.market, settlement: f.settlement, buy: f.buy, sell: f.sell, samples: f.samples, window: f.window, method: f.method }); }
+  function computeFixings(S, ctx, { sign, method = 'median 08:00–16:00 Kabul', force = false } = {}) {
+    const sod = kabulStartOfDay(ctx.now), date = kabulDate(ctx.now);
+    // Scheduled run: 08:00–16:00. Manual (admin) run: everything published today so far.
+    const from = force ? sod : sod + 8 * 3600e3, to = force ? ctx.now : Math.min(sod + 16 * 3600e3, ctx.now);
+    if (!force && ctx.now < sod + 16 * 3600e3) return { created: 0, reason: 'before-16' };
+    if (S.count('fixings', { date }) > 0) return { created: 0, reason: 'exists' };
+    let created = 0;
+    for (const r of S.find('rates', { market: 'کابل' }, { limit: 500 })) {
+      if (r.hidden || !r.key || r.key.startsWith('legacy|')) continue;
+      const pts = S.find('rateHistory', { key: r.key, at: { gte: from, lte: to } }, { order: 'at', limit: 20000 });
+      const buys = pts.map((x) => x.buy).filter((v) => v != null), sells = pts.map((x) => x.sell).filter((v) => v != null);
+      if (!buys.length && !sells.length) continue;
+      const f = { date, key: r.key, code: r.code, quote: r.quote, market: r.market, settlement: r.settlement, buy: median(buys), sell: median(sells), samples: pts.length,
+        window: [new Date(from).toISOString(), new Date(to).toISOString()], method: force ? 'median, Kabul day so far (manual publication)' : method, at: ctx.now };
+      f.payload = fixingPayload(f);
+      if (sign) f.signature = sign(f.payload);
+      S.put('fixings', f);
+      created++;
+    }
+    if (created) { audit(S, ctx, null, 'fixing.published', `date:${date}`, `${created} rate(s)`); market(ctx); }
+    return { created, date };
+  }
+  function fixingsFor(S, { date = null, key = null, limit = 60 } = {}) {
+    const where = {}; if (date) where.date = date; if (key) where.key = key;
+    return S.find('fixings', where, { order: '-id', limit });
+  }
+  // Anonymised recent trades (accepted or completed deals): time, asset, side, amount, price.
+  function tradeTape(S, limit = 40) {
+    const ds = S.find('deals', { status: { in: ['accepted', 'completed'] } }, { order: '-updatedAt', limit });
+    const orders = new Map(); for (const d of ds) if (!orders.has(d.orderId)) orders.set(d.orderId, S.get('orders', d.orderId));
+    return ds.map((d) => { const o = orders.get(d.orderId) || {}; return { at: d.acceptedAt || d.updatedAt, assetId: o.assetId, side: o.side === 'sell' ? 'buy' : 'sell', amount: d.acceptedAmount, price: d.price, unit: o.unit, cur: o.priceCurrency, done: d.status === 'completed' }; });
+  }
+
   // 7-day mini trend per rate (mid price), for table sparklines.
   function sparks(S, now, points = 24) {
     const out = {};
@@ -921,7 +980,7 @@
   Object.assign(actions, rateActions);
 
   /* ----- actions that change official data or privileges (host must re-verify the password) ----- */
-  const SENSITIVE = new Set(['admin.rate.set', 'admin.rate.auto', 'admin.rate.remove', 'admin.message.apply', 'admin.user.setRole', 'admin.asset.save', 'admin.asset.toggle', 'admin.asset.delete', 'admin.source.save', 'admin.source.toggle', 'admin.broadcast']);
+  const SENSITIVE = new Set(['admin.rate.set', 'admin.rate.auto', 'admin.rate.remove', 'admin.message.apply', 'admin.user.setRole', 'admin.asset.save', 'admin.asset.toggle', 'admin.asset.delete', 'admin.source.save', 'admin.source.toggle', 'admin.broadcast', 'admin.fixing.run']);
 
   function dispatch(S, actorId, type, payload, ctx) {
     const fn = actions[type];
@@ -1021,6 +1080,8 @@
       notifications: me ? S.find('notifications', { userId: me.id }, { order: '-id', limit: LIMITS.notifications }) : [],
       unread: me ? S.count('notifications', { userId: me.id, read: false }) : 0,
       alerts: me ? S.find('alerts', { userId: me.id }, { order: '-id', limit: 40 }).filter((a) => !a.deleted) : [],
+      tape: cached(S, 'tape', now, 3000, () => tradeTape(S)),
+      fixings: cached(S, 'fix', now, 10000, () => { const last = S.one('fixings', {}, {}) && S.find('fixings', {}, { order: '-id', limit: 1 })[0]; return last ? S.find('fixings', { date: last.date }, { limit: 200 }).map(({ payload, ...f }) => f) : []; }),
       serverTime: now,
     };
     if (isAdmin) {
@@ -1150,7 +1211,7 @@
 
   return {
     ACTIVITIES, ORDER_STATUS, DEAL_STATUS, USER_STATUS, PROVINCES, SENSITIVE, RATE_GUARD, EngineError,
-    MemoryStore, matchWhere, register, createAdmin, findByPhone, parseRateMessage, ingestMessage, rateHistory, adminMessages, sparks, rateStats, ensureCurrencies, ensureDefaultSource, rateKey, MARKETS, QUOTES, SETTLEMENT, dispatch, buildView, adminUsers, seed, verifyAudit, sweep, chainHash,
+    MemoryStore, matchWhere, register, createAdmin, findByPhone, parseRateMessage, ingestMessage, rateHistory, adminMessages, sparks, rateStats, computeFixings, fixingsFor, fixingPayload, tradeTape, kabulDate, ensureCurrencies, ensureDefaultSource, rateKey, MARKETS, QUOTES, SETTLEMENT, dispatch, buildView, adminUsers, seed, verifyAudit, sweep, chainHash,
     actions: Object.keys(actions),
   };
 });

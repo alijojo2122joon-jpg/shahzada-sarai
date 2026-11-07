@@ -18,6 +18,7 @@ const KINDS = {
   tgMessages: [['sourceId', 'msgId'], ['status'], ['channel']],
   sources: [['channel'], ['enabled']],
   alerts: [['key', 'active'], ['userId', 'active'], ['userId']],
+  fixings: [['date', 'key'], ['key', 'date'], ['date']],
   reports: [['status'], ['reporterId', 'createdAt']],
   audit: [],
 };
@@ -32,7 +33,9 @@ function SqlStore(db) {
   // The audit trail is append-only at the database level.
   db.exec(`
     CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON t_audit BEGIN SELECT RAISE(ABORT, 'audit is append-only'); END;
-    CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON t_audit BEGIN SELECT RAISE(ABORT, 'audit is append-only'); END;`);
+    CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON t_audit BEGIN SELECT RAISE(ABORT, 'audit is append-only'); END;
+    CREATE TRIGGER IF NOT EXISTS fixings_no_update BEFORE UPDATE ON t_fixings BEGIN SELECT RAISE(ABORT, 'fixings are immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS fixings_no_delete BEFORE DELETE ON t_fixings BEGIN SELECT RAISE(ABORT, 'fixings are immutable'); END;`);
 
   const cache = new Map();
   const stmt = (sql) => { let s = cache.get(sql); if (!s) { s = db.prepare(sql); cache.set(sql, s); } return s; };

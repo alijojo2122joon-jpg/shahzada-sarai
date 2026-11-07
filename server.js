@@ -40,6 +40,7 @@ db.exec(`
     created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL, expires_at INTEGER NOT NULL, ip TEXT);
   CREATE INDEX IF NOT EXISTS ix_sessions_user ON sessions(user_id);
 `);
+if (!db.prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'ua'").get()) db.exec('ALTER TABLE sessions ADD COLUMN ua TEXT');
 const S = SqlStore(db);
 
 const hashPassword = (pw) => {
@@ -92,6 +93,7 @@ async function fetchSource(src) {
   if (fetching.has(src.id)) return { skipped: true };
   fetching.add(src.id);
   const result = { fetched: 0, new: 0, applied: 0, review: 0 };
+  const t0 = Date.now();
   try {
     const res = await fetch(`https://t.me/s/${encodeURIComponent(src.channel)}`, {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ShahzadaSaraiRates/1.0)', 'Accept-Language': 'fa,en;q=0.8' }, signal: AbortSignal.timeout(15000) });
@@ -105,10 +107,10 @@ async function fetchSource(src) {
       if (r.status !== 'duplicate') { result.new++; result.applied += r.applied || 0; result.review += r.review || 0; publish(ctx); }
     }
     if (result.applied) guestCache.at = 0;
-    S.tx(() => { const x = S.get('sources', src.id); x.lastFetchAt = Date.now(); x.lastError = ''; x.lastOkAt = Date.now(); x.lastMsgId = msgs[msgs.length - 1].msgId; S.put('sources', x); });
+    S.tx(() => { const x = S.get('sources', src.id); x.lastFetchAt = Date.now(); x.lastError = ''; x.lastOkAt = Date.now(); x.lastMsgId = msgs[msgs.length - 1].msgId; x.fetches = (x.fetches || 0) + 1; x.lastLatencyMs = Date.now() - t0; S.put('sources', x); });
   } catch (e) {
     result.error = e.message;
-    S.tx(() => { const x = S.get('sources', src.id); if (x) { x.lastFetchAt = Date.now(); x.lastError = String(e.message).slice(0, 200); S.put('sources', x); } });
+    S.tx(() => { const x = S.get('sources', src.id); if (x) { x.lastFetchAt = Date.now(); x.lastError = String(e.message).slice(0, 200); x.fetches = (x.fetches || 0) + 1; x.failures = (x.failures || 0) + 1; S.put('sources', x); } });
   } finally { fetching.delete(src.id); }
   return result;
 }
@@ -116,6 +118,28 @@ const POLL_MS = Number(process.env.RATE_POLL_SECONDS || 60) * 1000;
 function pollAll() { if (process.env.TELEGRAM_FETCH === '0') return; for (const src of S.find('sources', { enabled: true })) fetchSource(src).catch(() => {}); }
 setTimeout(pollAll, 5000).unref();
 setInterval(pollAll, POLL_MS).unref();
+
+/* ---------- Ed25519 signing of official data (reference rates, public snapshots) ---------- */
+let signKey;
+{
+  const stored = process.env.SIGNING_KEY || S.meta('signKeyPkcs8');
+  if (stored) signKey = crypto.createPrivateKey({ key: Buffer.from(stored, 'base64'), format: 'der', type: 'pkcs8' });
+  else {
+    const { privateKey } = crypto.generateKeyPairSync('ed25519');
+    signKey = privateKey;
+    S.tx(() => S.meta('signKeyPkcs8', privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64')));
+  }
+}
+const pubKey = crypto.createPublicKey(signKey);
+const PUB_RAW = pubKey.export({ format: 'der', type: 'spki' }).subarray(-32).toString('base64');
+const PUB_PEM = pubKey.export({ format: 'pem', type: 'spki' });
+const sign = (payload) => crypto.sign(null, Buffer.from(payload), signKey).toString('base64');
+const verifySig = (payload, sig) => { try { return crypto.verify(null, Buffer.from(payload), pubKey, Buffer.from(String(sig), 'base64')); } catch { return false; } };
+
+/* ---------- service metrics (for the public status page) ---------- */
+const STARTED = Date.now();
+const metrics = { reqs: [], errors: 0 };
+function track(ms, status) { const now = Date.now(); metrics.reqs.push([now, ms]); if (status >= 500) metrics.errors++; if (metrics.reqs.length > 5000) metrics.reqs.splice(0, 1000); }
 
 /* ---------- TOTP (RFC 6238) for admin second factor ---------- */
 const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -143,10 +167,11 @@ function totpCheck(secret, code, lastStep) {
 /* ---------- sessions ---------- */
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 const COOKIE = { user: 'sid', admin: 'asid' };
-function createSession(userId, scope, ip) {
+function createSession(userId, scope, ip, ua) {
   const token = crypto.randomBytes(32).toString('base64url');
   const now = Date.now();
-  db.prepare('INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?)').run(sha(token), userId, scope, now, now, now + (scope === 'admin' ? ADMIN_MAX_MS : USER_SESSION_MS), ip || '');
+  db.prepare('INSERT INTO sessions (token_hash, user_id, scope, created_at, last_seen, expires_at, ip, ua) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(sha(token), userId, scope, now, now, now + (scope === 'admin' ? ADMIN_MAX_MS : USER_SESSION_MS), ip || '', String(ua || '').slice(0, 200));
   return token;
 }
 function readCookie(req, name) {
@@ -217,6 +242,10 @@ function publish(ctx) {
   }
 }
 setInterval(() => { for (const res of clients.keys()) res.write(': ping\n\n'); }, 25e3).unref();
+setInterval(() => { // publish the daily reference rate at 16:00 Kabul
+  const ctx = { now: Date.now() };
+  try { const r = S.tx(() => Engine.computeFixings(S, ctx, { sign })); if (r.created) { publish(ctx); guestCache.at = 0; } } catch (e) { console.error('fixing', e.message); }
+}, 60e3).unref();
 setInterval(() => { // expire orders even when nobody acts
   const ctx = { now: Date.now() };
   try { if (S.tx(() => Engine.sweep(S, ctx))) publish(ctx); } catch (e) { console.error('sweep', e.message); }
@@ -297,6 +326,29 @@ async function api(req, res, url) {
       if (now - sparkCache.at > 60e3) sparkCache = { at: now, body: Engine.sparks(S, now) };
       return send(req, res, 200, sparkCache.body);
     }
+    if (p === '/api/public/key') return send(req, res, 200, { algorithm: 'Ed25519', publicKey: PUB_RAW, pem: PUB_PEM }, { 'Access-Control-Allow-Origin': '*' });
+    if (p === '/api/public/fixings') {
+      const list = Engine.fixingsFor(S, { date: url.searchParams.get('date') || null, key: url.searchParams.get('key') || null, limit: 120 });
+      return send(req, res, 200, { algorithm: 'Ed25519', publicKey: PUB_RAW, fixings: list }, { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'public, max-age=30' });
+    }
+    if (p === '/api/public/verify') {
+      const f = S.get('fixings', Number(url.searchParams.get('id')));
+      if (!f) return send(req, res, 404, { error: 'رکورد یافت نشد.' });
+      const intact = f.payload === Engine.fixingPayload(f);
+      return send(req, res, 200, { payload: f.payload, signature: f.signature || null, publicKey: PUB_RAW, algorithm: 'Ed25519', valid: !!f.signature && intact && verifySig(f.payload, f.signature) }, { 'Access-Control-Allow-Origin': '*' });
+    }
+    if (p === '/api/public/status') {
+      const recent = metrics.reqs.filter(([t]) => now - t < 5 * 60e3).map(([, ms]) => ms).sort((a, b) => a - b);
+      const pct = (q) => (recent.length ? recent[Math.min(recent.length - 1, Math.floor(recent.length * q))] : null);
+      const lastRate = S.find('rates', {}, { order: '-updatedAt', limit: 1 })[0];
+      return send(req, res, 200, {
+        status: 'operational', version: '0.4', startedAt: STARTED, uptimeSec: Math.round((now - STARTED) / 1000), serverTime: now,
+        api: { requests5m: recent.length, p50ms: pct(0.5), p95ms: pct(0.95), errors: metrics.errors },
+        data: { lastRateAt: lastRate ? lastRate.updatedAt : null, rates: S.count('rates', {}), historyPoints: S.count('rateHistory', {}), fixingsToday: S.count('fixings', { date: Engine.kabulDate(now) }), auditIntact: Engine.verifyAudit(S, 500) },
+        sources: S.find('sources', {}).map((x) => ({ channel: x.channel, label: x.label, enabled: x.enabled, lastOkAt: x.lastOkAt || null, lastFetchAt: x.lastFetchAt || null, lastError: x.lastError || '', fetches: x.fetches || 0, failures: x.failures || 0, latencyMs: x.lastLatencyMs || null })),
+        signing: { algorithm: 'Ed25519', publicKey: PUB_RAW },
+      }, { 'Access-Control-Allow-Origin': '*' });
+    }
     // Public read-only API for other applications (CORS open, cached).
     if (p === '/api/public/rates') {
       if (now - publicCache.at > 15e3) {
@@ -306,6 +358,8 @@ async function api(req, res, url) {
           .map((r) => ({ code: r.code, name: (assets[r.code] || {}).name || r.code, quote: r.quote, market: r.market, settlement: r.settlement, buy: r.buy, sell: r.sell,
             buyChange: r.buy != null && r.prevBuy != null ? round6(r.buy - r.prevBuy) : null, sellChange: r.sell != null && r.prevSell != null ? round6(r.sell - r.prevSell) : null,
             updatedAt: new Date(r.updatedAt).toISOString(), entry: r.kind === 'manual' ? 'manual' : 'automatic' })) } };
+        publicCache.body.signature = sign(JSON.stringify(publicCache.body.rates)); // Ed25519 over JSON.stringify(rates)
+        publicCache.body.publicKey = PUB_RAW;
       }
       return send(req, res, 200, publicCache.body, { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'public, max-age=15' });
     }
@@ -316,6 +370,11 @@ async function api(req, res, url) {
     if (p === '/api/admin/users') {
       if (sess.scope !== 'admin' || !sess.uid) throw new Engine.EngineError('دسترسی ندارید.', 'forbidden');
       return send(req, res, 200, Engine.adminUsers(S, sess.uid, Object.fromEntries(url.searchParams)));
+    }
+    if (p === '/api/sessions') {
+      if (!sess.uid) throw new Engine.EngineError('ابتدا وارد حساب شوید.', 'unauthorized');
+      const rows = db.prepare('SELECT token_hash, scope, created_at, last_seen, ip, ua FROM sessions WHERE user_id = ? AND expires_at > ? ORDER BY last_seen DESC').all(sess.uid, now);
+      return send(req, res, 200, { sessions: rows.map((r) => ({ id: r.token_hash.slice(0, 16), scope: r.scope, createdAt: r.created_at, lastSeen: r.last_seen, ip: r.ip, ua: r.ua || '', current: r.token_hash === sess.th })) });
     }
     return send(req, res, 404, { error: 'یافت نشد.' });
   }
@@ -330,7 +389,7 @@ async function api(req, res, url) {
   if (p === '/api/register') {
     if (limited('reg:' + ip, 5, 3600e3)) throw tooMany();
     const user = S.tx(() => { const ctx = { now }; const u = Engine.register(S, body, ctx, { hashPassword }); publish(ctx); return u; });
-    const token = createSession(user.id, 'user', ip);
+    const token = createSession(user.id, 'user', ip, req.headers['user-agent']);
     return send(req, res, 200, { ok: true }, { 'Set-Cookie': cookie(COOKIE.user, token, USER_SESSION_MS / 1000) });
   }
 
@@ -349,11 +408,11 @@ async function api(req, res, url) {
         if (step == null) { recordFailure(u); throw new Engine.EngineError('کد تأیید دومرحله‌ای نادرست است.', 'unauthorized'); }
         recordSuccess(u, { totpLastStep: step });
       } else recordSuccess(u);
-      const token = createSession(u.id, 'admin', ip);
+      const token = createSession(u.id, 'admin', ip, req.headers['user-agent']);
       return send(req, res, 200, { ok: true, totpEnabled: !!u.totpEnabled }, { 'Set-Cookie': cookie(COOKIE.admin, token, ADMIN_MAX_MS / 1000, true) });
     }
     recordSuccess(u);
-    const token = createSession(u.id, 'user', ip);
+    const token = createSession(u.id, 'user', ip, req.headers['user-agent']);
     return send(req, res, 200, { ok: true }, { 'Set-Cookie': cookie(COOKIE.user, token, USER_SESSION_MS / 1000) });
   }
 
@@ -373,6 +432,16 @@ async function api(req, res, url) {
     if (me.role === 'admin' && !(/[A-Za-z]/.test(next) && /\d/.test(next) && next.length >= 10)) throw new Engine.EngineError('رمز مدیر باید حداقل ۱۰ حرف و شامل حرف و عدد باشد.');
     S.tx(() => { const x = S.get('users', me.id); x.passHash = hashPassword(next); x.passChangedAt = now; S.put('users', x); });
     db.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?').run(me.id, sess.th); // sign out other devices
+    return send(req, res, 200, { ok: true });
+  }
+
+  if (p === '/api/sessions') {
+    const rows = db.prepare('SELECT token_hash, scope, created_at, last_seen, ip, ua FROM sessions WHERE user_id = ? AND expires_at > ? ORDER BY last_seen DESC').all(me.id, now);
+    return send(req, res, 200, { sessions: rows.map((r) => ({ id: r.token_hash.slice(0, 16), scope: r.scope, createdAt: r.created_at, lastSeen: r.last_seen, ip: r.ip, ua: r.ua || '', current: r.token_hash === sess.th })) });
+  }
+  if (p === '/api/sessions/revoke') {
+    if (body.id === 'others') db.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?').run(me.id, sess.th);
+    else db.prepare('DELETE FROM sessions WHERE user_id = ? AND substr(token_hash, 1, 16) = ? AND token_hash != ?').run(me.id, String(body.id || ''), sess.th);
     return send(req, res, 200, { ok: true });
   }
 
@@ -417,7 +486,7 @@ async function api(req, res, url) {
       if (limited('sens:' + sess.uid, 20, 15 * 60e3)) throw tooMany();
       if (!verifyPassword(body.password, me.passHash)) throw new Engine.EngineError('برای این عملیات رمز عبور خود را درست وارد کنید.', 'unauthorized');
     }
-    const ctx = { now, scope: sess.scope };
+    const ctx = { now, scope: sess.scope, sign };
     const result = S.tx(() => Engine.dispatch(S, sess.uid, type, body.payload, ctx));
     publish(ctx);
     if (ctx.market) { guestCache.at = 0; publicCache.at = 0; sparkCache.at = 0; }
@@ -460,6 +529,8 @@ function serveStatic(req, res, url) {
 }
 
 const server = http.createServer(async (req, res) => {
+  const t0 = Date.now();
+  res.on('finish', () => { if (req.url.startsWith('/api/') && !req.url.startsWith('/api/stream')) track(Date.now() - t0, res.statusCode); });
   let url;
   try { url = new URL(req.url, 'http://localhost'); } catch { res.writeHead(400); return res.end(); }
   try {
@@ -478,4 +549,4 @@ server.requestTimeout = 30e3;
 if (require.main === module) {
   server.listen(PORT, () => console.log(`Shahzada Sarai → http://localhost:${PORT}  (admin panel: ${ADMIN_PATH})`));
 }
-module.exports = { server, totpAt, b32encode, parseTelegramHtml };
+module.exports = { server, totpAt, b32encode, parseTelegramHtml, PUB_RAW };
