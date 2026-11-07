@@ -139,7 +139,21 @@
   const DEAL_CLS = { pending: 'warn', accepted: 'blue', completed: 'ok', rejected: 'bad', cancelled: 'bad' };
   const orderBadge = (s) => `<span class="badge ${ORDER_CLS[s] || ''}">${E.ORDER_STATUS[s] || s}</span>`;
   const dealBadge = (s) => `<span class="badge ${DEAL_CLS[s] || ''}">${E.DEAL_STATUS[s] || s}</span>`;
-  const userBadge = (s) => `<span class="badge ${s === 'approved' ? 'ok' : s === 'blocked' ? 'bad' : 'warn'}">${E.USER_STATUS[s]}</span>`;
+  const userBadge = (s) => `<span class="badge ${s === 'approved' ? 'ok' : s === 'blocked' || s === 'rejected' ? 'bad' : 'warn'}">${E.USER_STATUS[s]}</span>`;
+  const provinceOptions = (sel) => `<option value="">انتخاب ولایت</option>${E.PROVINCES.map((p) => `<option ${p === sel ? 'selected' : ''}>${p}</option>`).join('')}`;
+  function kycInputs(u = {}) {
+    return `<div class="grid g2">
+        <label class="field"><span>ولایت</span><select class="input" name="province" required>${provinceOptions(u.province)}</select></label>
+        <label class="field"><span>شهر / ولسوالی</span><input class="input" name="city" value="${esc(u.city || '')}"></label>
+      </div>
+      <label class="field"><span>آدرس دفتر یا دکان</span><input class="input" name="address" value="${esc(u.address || '')}" placeholder="مثلاً: سرای شهزاده، منزل دوم، دکان ۱۲" required></label>
+      <div class="grid g2">
+        <label class="field"><span>سابقه کار</span><input class="input" name="experience" value="${esc(u.experience || '')}" placeholder="مثلاً ۸ سال"></label>
+        <label class="field"><span>نام ضامن یا معرف (اختیاری)</span><input class="input" name="guarantorName" value="${esc(u.guarantorName || '')}"></label>
+      </div>
+      <label class="field"><span>شماره تماس ضامن (اختیاری)</span><input class="input num" name="guarantorPhone" inputmode="tel" value="${esc(u.guarantorPhone || '')}"></label>
+      <label class="field"><span>توضیح درباره کار شما (اختیاری)</span><textarea class="input" name="about" placeholder="چه ارزها یا کالاهایی معامله می‌کنید؟">${esc(u.about || '')}</textarea></label>`;
+  }
   const assetChip = (a, sub) => `<span class="asset-chip"><span class="asset-ico ${a.kind === 'metal' ? 'metal-' + a.code : ''}">${esc(a.code)}</span><span>${esc(a.name)}${sub ? `<div class="muted small" style="font-weight:400">${sub}</div>` : ''}</span></span>`;
   function nameLink(id) {
     const u = user(id);
@@ -173,7 +187,7 @@
   /* =========================================================
      Data flow
      ========================================================= */
-  async function refresh() { view = await backend.getView(); }
+  async function refresh() { view = await backend.getView(); if (lastNotifId === null && view.me) systemNotify(); }
   async function act(type, payload, okMsg) {
     try {
       const r = await backend.action(type, payload);
@@ -183,8 +197,23 @@
     } catch (e) { toast(e.message, true); throw e; }
   }
   const busy = () => document.querySelector('.modal-bg') || (document.activeElement && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) && document.activeElement.value);
+  let lastNotifId = null;
+  function systemNotify() {
+    if (!view || !view.me) { lastNotifId = null; return; }
+    const top = view.notifications.length ? view.notifications[0].id : 0;
+    if (lastNotifId === null) { lastNotifId = top; return; }
+    const fresh = view.notifications.filter((n) => n.id > lastNotifId && !n.read);
+    lastNotifId = Math.max(lastNotifId, top);
+    if (!fresh.length || !('Notification' in window) || Notification.permission !== 'granted') return;
+    for (const n of fresh.slice(0, 3)) {
+      const opts = { body: n.text, icon: 'icon-192.png', badge: 'icon-192.png', tag: 'sarai-' + n.id, lang: 'fa', dir: 'rtl' };
+      if (navigator.serviceWorker && navigator.serviceWorker.controller) navigator.serviceWorker.ready.then((r) => r.showNotification('سرای شهزاده', opts)).catch(() => {});
+      else { try { new Notification('سرای شهزاده', opts); } catch { /* ignore */ } }
+    }
+  }
   async function onRemoteChange() {
     await refresh();
+    systemNotify();
     if (busy()) { pendingRender = true; return; }
     render();
   }
@@ -254,6 +283,7 @@
     return `<div class="drawer card">
       <div class="row card-pad" style="padding:12px 16px;border-bottom:1px solid var(--line)"><b>اعلان‌ها</b><span class="spacer"></span>
       ${list.some((n) => !n.read) ? '<button class="btn btn-ghost btn-sm" data-act="read-all">همه خوانده شد</button>' : ''}</div>
+      ${notifPermissionButton() ? `<div style="padding:10px 16px;border-bottom:1px solid var(--line)">${notifPermissionButton()}</div>` : ''}
       ${list.length ? list.slice(0, 30).map((n) => `<div class="notif ${n.read ? '' : 'unread'}" data-act="open-notif" data-id="${n.id}" data-link="${esc(n.link)}">${esc(n.text)}<time>${ago(n.at)}</time></div>`).join('') : emptyBox('اعلانی ندارید')}
     </div>`;
   }
@@ -310,6 +340,7 @@
     let m;
     if (ADMIN_MODE) {
       if (!isAdmin()) return pageAdminLogin();
+      if ((m = /^admin-review-(\d+)$/.exec(r))) return pageReview(Number(m[1]));
       if ((m = /^admin(?:-(\w+))?$/.exec(r))) return pageAdmin(m[1] || 'overview');
       if ((m = /^order-(\d+)$/.exec(r))) return adminBack() + pageOrder(Number(m[1]));
       if ((m = /^deal-(\d+)$/.exec(r))) return adminBack() + pageDeal(Number(m[1]));
@@ -332,7 +363,7 @@
   }
   const gate = (msg, extra = '') => `<div class="auth-wrap card card-pad" style="text-align:center"><p>${msg}</p>${extra}</div>`;
   const needUser = () => (me() ? null : gate('برای دیدن این صفحه وارد حساب خود شوید.', '<div class="row" style="justify-content:center"><a class="btn btn-primary" href="#login">ورود</a><a class="btn" href="#register">ثبت‌نام</a></div>'));
-  const needApproved = () => needUser() || (approved() ? null : gate('حساب شما هنوز توسط مدیر تأیید نشده است. پس از تأیید، به تمام بخش‌های بازار دسترسی خواهید داشت.', '<a class="btn" href="#profile">مشاهده پروفایل</a>'));
+  const needApproved = () => needUser() || (approved() ? null : gate(me().status === 'rejected' ? 'درخواست عضویت شما رد شده است. برای دیدن دلیل و ارسال دوباره به پروفایل بروید.' : 'حساب شما هنوز توسط مدیر تأیید نشده است. پس از تأیید، به تمام بخش‌های بازار دسترسی خواهید داشت.', '<a class="btn btn-primary" href="#profile">وضعیت حساب من</a>'));
 
   /* =========================================================
      Orders table (shared)
@@ -793,9 +824,29 @@
   }
 
   /* ---------- profile ---------- */
+  function statusHero(m) {
+    if (m.status === 'pending') return `<div class="card card-pad glow g-warm" style="text-align:center;margin-bottom:24px">
+      <div class="ring-big" style="width:130px;height:130px;margin:6px auto 14px"><span class="halo"></span>${ringSvg(0.7, 130, 8, '#ffb34d', '#ff6b7a')}<div class="center"><b style="font-size:30px">⏳</b></div></div>
+      <h2 style="margin:0 0 6px">درخواست شما در حال بررسی است</h2>
+      <p class="muted" style="margin:0">مشخصات شما برای مدیریت سرای شهزاده ارسال شد. به محض تأیید یا رد، از طریق اعلان به شما خبر داده می‌شود.</p>
+      ${notifPermissionButton()}</div>`;
+    if (m.status === 'rejected') return `<div class="card card-pad glow g-sell" style="margin-bottom:24px">
+      <h2 style="margin:0 0 6px;color:var(--sell)">درخواست عضویت شما رد شد</h2>
+      ${m.statusReason ? `<p style="margin:0 0 14px">دلیل مدیریت: <b>${esc(m.statusReason)}</b></p>` : ''}
+      <form class="stack" data-form="resubmit"><p class="muted small" style="margin:0">مشخصات را اصلاح کنید و دوباره بفرستید:</p>
+        <div class="grid g2"><label class="field"><span>نام و نام خانوادگی</span><input class="input" name="name" value="${esc(m.name)}" required></label>
+        <label class="field"><span>نام صرافی یا شرکت</span><input class="input" name="company" value="${esc(m.company)}" required></label></div>
+        ${kycInputs(m)}
+        <button class="btn btn-primary btn-lg">ارسال دوباره برای بررسی</button></form></div>`;
+    return '';
+  }
+  function notifPermissionButton() {
+    if (backend.mode !== 'server' || !('Notification' in window) || Notification.permission !== 'default') return '';
+    return '<button class="btn btn-sm" data-act="enable-push" style="margin-top:14px">🔔 فعال‌کردن اعلان روی گوشی</button>';
+  }
   function pageProfile() {
     const m = me();
-    return `<div class="page-head"><div><h1>پروفایل من</h1><p>${userBadge(m.status)} ${m.role === 'admin' ? '<span class="badge blue">مدیر سیستم</span>' : ''} · عضو از ${fmtDate(m.createdAt)}</p></div></div>
+    return `${statusHero(m)}<div class="page-head"><div><h1>پروفایل من</h1><p>${userBadge(m.status)} ${m.role === 'admin' ? '<span class="badge blue">مدیر سیستم</span>' : ''} · عضو از ${fmtDate(m.createdAt)}</p></div></div>
     <div class="split">
       <form class="card card-pad stack" data-form="profile">
         <h2>مشخصات</h2>
@@ -812,7 +863,10 @@
       </form>
       <aside class="stack">
         <div class="card card-pad"><h3>وضعیت حساب</h3>
-          ${m.status === 'approved' ? `<p style="margin:0">${ICON.check} حساب شما تأیید شده است و نشان تأیید کنار نام شما نمایش داده می‌شود.</p>` : '<p class="muted" style="margin:0">حساب شما منتظر بررسی و تأیید مدیر است.</p>'}</div>
+          ${m.status === 'approved' ? `<p style="margin:0">${ICON.check} حساب شما تأیید شده است و نشان تأیید کنار نام شما نمایش داده می‌شود.</p>`
+            : m.status === 'rejected' ? `<p style="margin:0;color:var(--sell)">درخواست شما رد شده است.</p>${m.statusReason ? `<p class="small" style="margin:6px 0 0">دلیل: ${esc(m.statusReason)}</p>` : ''}`
+            : m.status === 'blocked' ? `<p style="margin:0;color:var(--sell)">حساب شما مسدود است.</p>`
+            : '<p class="muted" style="margin:0">مشخصات شما برای مدیریت ارسال شده و در حال بررسی است.</p>'}</div>
         <form class="card card-pad stack" data-form="password"><h3>تغییر رمز عبور</h3>
           <input class="input" type="password" name="current" placeholder="رمز فعلی" required autocomplete="current-password">
           <input class="input" type="password" name="next" placeholder="رمز جدید (حداقل ۶ حرف)" required autocomplete="new-password">
@@ -895,6 +949,40 @@
       <div class="notice small">حساب‌های نمونه برای آزمایش: <span class="num">0700000001</span> تا <span class="num">0700000005</span> — رمز همه <span class="num">123456</span></div>
     </form></div>`;
   }
+  function pageReview(id) {
+    const u = view.admin.users.find((x) => x.id === id);
+    if (!u) return gate('این کاربر پیدا نشد.');
+    const isSelf = u.id === me().id;
+    const row = (k, v, cls = '') => `<dt>${k}</dt><dd class="${cls}">${v || '<span class="muted">—</span>'}</dd>`;
+    const waLink = (ph) => ph ? `<a class="badge ok" href="https://wa.me/${esc(ph.replace(/^0/, '93').replace(/\D/g, ''))}" target="_blank" rel="noopener">${ICON.wa} <span class="num">${esc(ph)}</span></a>` : '';
+    const orders = view.orders.filter((o) => o.userId === u.id).length, deals = view.deals.filter((d) => d.ownerId === u.id || d.requesterId === u.id).length;
+    return `<a class="btn btn-sm" href="#admin-users" style="margin-bottom:16px">→ بازگشت به کاربران</a>
+    <div class="page-head"><div><h1>${esc(u.company)}</h1><p>${userBadge(u.status)} · درخواست ${fmtDate(u.createdAt)}${u.resubmittedAt ? ` · ارسال دوباره ${ago(u.resubmittedAt)}` : ''}</p></div></div>
+    <div class="split">
+      <div class="stack">
+        <div class="card card-pad"><h3>هویت و تماس</h3><dl class="kv">
+          ${row('نام و نام خانوادگی', esc(u.name))}${row('نام صرافی / شرکت', esc(u.company))}${row('نوع فعالیت', E.ACTIVITIES[u.activity])}
+          ${row('شماره تماس', `<span class="num">${esc(u.phone)}</span>`)}${row('واتس‌اپ', waLink(u.whatsapp))}
+        </dl></div>
+        <div class="card card-pad"><h3>محل و سابقه کار</h3><dl class="kv">
+          ${row('ولایت', esc(u.province))}${row('شهر / ولسوالی', esc(u.city))}${row('آدرس دفتر / دکان', esc(u.address))}${row('سابقه کار', esc(u.experience))}
+          ${row('ضامن / معرف', esc(u.guarantorName))}${row('تماس ضامن', u.guarantorPhone ? `<span class="num">${esc(u.guarantorPhone)}</span>` : '')}
+        </dl>${u.about ? `<p class="small" style="margin:14px 0 0">💬 ${esc(u.about)}</p>` : ''}</div>
+        ${u.statusReason ? `<div class="notice warn">آخرین دلیل ثبت‌شده: ${esc(u.statusReason)}</div>` : ''}
+      </div>
+      <aside class="stack">
+        <div class="card card-pad glow ${u.status === 'pending' ? 'g-warm' : ''}"><h3>تصمیم مدیریت</h3>
+          ${isSelf ? '<p class="muted small">این حساب خود شماست.</p>' : `<div class="stack">
+            ${u.status !== 'approved' ? `<button class="btn btn-buy btn-block btn-lg" data-act="user-status" data-id="${u.id}" data-v="approved">✓ تأیید عضویت</button>` : ''}
+            ${u.status === 'pending' ? `<button class="btn btn-sell btn-block" data-act="reject-user" data-id="${u.id}">✕ رد درخواست</button>` : ''}
+            ${u.status !== 'blocked' ? `<button class="btn btn-block" data-act="block-user" data-id="${u.id}">⛔ مسدودکردن</button>` : ''}
+            <button class="btn btn-block btn-sm" data-act="user-role" data-id="${u.id}" data-v="${u.role === 'admin' ? 'member' : 'admin'}">${u.role === 'admin' ? 'حذف دسترسی مدیر' : 'دادن دسترسی مدیر'}</button>
+          </div><p class="muted small" style="margin:12px 0 0">نتیجه تصمیم شما فوراً به‌صورت اعلان برای این شخص ارسال می‌شود.</p>`}
+        </div>
+        <div class="card card-pad"><h3>فعالیت</h3><dl class="kv">${row('سفارش‌ها', `<span class="num">${orders}</span>`)}${row('معاملات', `<span class="num">${deals}</span>`)}${row('آخرین بررسی', u.reviewedAt ? fmtDate(u.reviewedAt) : '')}</dl></div>
+      </aside>
+    </div>`;
+  }
   const adminBack = () => '<a class="btn btn-sm" href="#admin" style="margin-bottom:16px">→ بازگشت به پنل</a>';
   function pageAdminLogin() {
     const m = me();
@@ -919,6 +1007,8 @@
         <label class="field"><span>شماره واتس‌اپ</span><input class="input num" name="whatsapp" inputmode="tel" placeholder="در صورت تفاوت"></label>
       </div>
       <label class="field"><span>نوع فعالیت</span><select class="input" name="activity" required><option value="">انتخاب کنید</option>${Object.entries(E.ACTIVITIES).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select></label>
+      ${kycInputs()}
+      <div class="notice small">این مشخصات فقط برای مدیریت سرای شهزاده نمایش داده می‌شود تا هویت شما بررسی و حساب تأیید شود.</div>
       <label class="field"><span>رمز عبور</span><input class="input" type="password" name="password" minlength="6" required autocomplete="new-password"></label>
       <div class="form-error hidden"></div>
       <button class="btn btn-primary btn-lg">ثبت‌نام</button>
@@ -961,17 +1051,14 @@
     } else if (tab === 'users') {
       const f = ui.adminUserFilter;
       const us = A.users.filter((u) => f === 'all' || u.status === f).sort((a, b) => (a.status === 'pending' ? -1 : 0) - (b.status === 'pending' ? -1 : 0) || b.createdAt - a.createdAt);
-      body = `<div class="card"><div class="row" style="padding:12px 14px;border-bottom:1px solid var(--line)"><div class="seg">${[['all', 'همه'], ['pending', 'منتظر تأیید'], ['approved', 'تأییدشده'], ['blocked', 'مسدود']].map(([k, l]) => `<button class="${f === k ? 'on' : ''}" data-act="user-filter" data-v="${k}">${l}</button>`).join('')}</div></div>
-        <div class="table-wrap"><table class="data responsive"><thead><tr><th>عضو</th><th>تماس</th><th>فعالیت</th><th>وضعیت</th><th>نقش</th><th>عضویت</th><th>عملیات</th></tr></thead><tbody>
-        ${us.map((u) => `<tr><td class="cell-main"><b>${esc(u.company)}</b><div class="muted small">${esc(u.name)}</div></td>
+      body = `<div class="card"><div class="row" style="padding:12px 14px;border-bottom:1px solid var(--line)"><div class="seg" style="overflow-x:auto;max-width:100%">${[['all', 'همه'], ['pending', 'منتظر بررسی'], ['approved', 'تأییدشده'], ['rejected', 'ردشده'], ['blocked', 'مسدود']].map(([k, l]) => `<button class="${f === k ? 'on' : ''}" data-act="user-filter" data-v="${k}">${l}</button>`).join('')}</div></div>
+        <div class="table-wrap"><table class="data responsive"><thead><tr><th>عضو</th><th>تماس</th><th>ولایت</th><th>فعالیت</th><th>وضعیت</th><th>ثبت‌نام</th><th>عملیات</th></tr></thead><tbody>
+        ${us.map((u) => `<tr class="clickable" data-href="#admin-review-${u.id}"><td class="cell-main"><b>${esc(u.company)}</b> ${u.role === 'admin' ? '<span class="badge blue">مدیر</span>' : ''}<div class="muted small">${esc(u.name)}</div></td>
           <td data-l="تماس" class="num small">${esc(u.phone)}${u.whatsapp && u.whatsapp !== u.phone ? `<br>${esc(u.whatsapp)}` : ''}</td>
+          <td data-l="ولایت">${esc(u.province || '—')}</td>
           <td data-l="فعالیت">${E.ACTIVITIES[u.activity] || ''}</td><td data-l="وضعیت">${userBadge(u.status)}</td>
-          <td data-l="نقش">${u.role === 'admin' ? '<span class="badge blue">مدیر</span>' : 'عضو'}</td><td data-l="عضویت" class="small">${fmtDate(u.createdAt)}</td>
-          <td class="cell-act"><div class="row">
-            ${u.status !== 'approved' ? `<button class="btn btn-buy btn-sm" data-act="user-status" data-id="${u.id}" data-v="approved">تأیید</button>` : ''}
-            ${u.status !== 'blocked' && u.id !== me().id ? `<button class="btn btn-sell btn-sm" data-act="user-status" data-id="${u.id}" data-v="blocked">مسدود</button>` : ''}
-            ${u.id !== me().id ? `<button class="btn btn-sm" data-act="user-role" data-id="${u.id}" data-v="${u.role === 'admin' ? 'member' : 'admin'}">${u.role === 'admin' ? 'حذف مدیریت' : 'مدیر کن'}</button>` : ''}
-          </div></td></tr>`).join('')}</tbody></table></div></div>`;
+          <td data-l="ثبت‌نام" class="small">${ago(u.createdAt)}</td>
+          <td class="cell-act"><a class="btn ${u.status === 'pending' ? 'btn-primary' : ''} btn-sm" href="#admin-review-${u.id}">${u.status === 'pending' ? 'بررسی و تأیید' : 'جزئیات'}</a></td></tr>`).join('')}</tbody></table></div></div>`;
     } else if (tab === 'orders') {
       const os = view.orders.slice().sort((a, b) => b.createdAt - a.createdAt);
       body = `<div class="card"><div class="table-wrap"><table class="data responsive"><thead><tr><th>سفارش</th><th>عضو</th><th>نوع</th><th>مقدار / باقی</th><th>نرخ</th><th>وضعیت</th><th></th></tr></thead><tbody>
@@ -1077,7 +1164,16 @@
         modal('گزارش تخلف', `<form data-form="report" data-uid="${t.dataset.uid}" data-deal="${t.dataset.deal || ''}" class="stack"><label class="field"><span>شرح مشکل</span><textarea class="input" name="reason" required placeholder="چه اتفاقی افتاد؟"></textarea></label><button class="btn btn-sell btn-block">ارسال گزارش به مدیر</button></form>`);
         break;
       case 'user-filter': ui.adminUserFilter = t.dataset.v; render(); break;
-      case 'user-status': await act('admin.user.setStatus', { userId: nid, status: t.dataset.v }, 'وضعیت کاربر به‌روز شد').catch(() => {}); break;
+      case 'reject-user':
+        modal('رد درخواست عضویت', `<form data-form="reject-user" data-id="${nid}" class="stack"><label class="field"><span>دلیل رد (برای متقاضی ارسال می‌شود)</span><textarea class="input" name="reason" required placeholder="مثلاً: آدرس دکان ناقص است یا ضامن تأیید نشد"></textarea></label><button class="btn btn-sell btn-block">رد و ارسال اعلان</button></form>`);
+        break;
+      case 'block-user':
+        modal('مسدودکردن حساب', `<form data-form="block-user" data-id="${nid}" class="stack"><label class="field"><span>دلیل (اختیاری)</span><input class="input" name="reason"></label><button class="btn btn-sell btn-block">مسدود کن</button></form>`);
+        break;
+      case 'enable-push':
+        try { const r = await Notification.requestPermission(); toast(r === 'granted' ? 'اعلان روی گوشی فعال شد' : 'اجازه اعلان داده نشد', r !== 'granted'); } catch { toast('این مرورگر اعلان را پشتیبانی نمی‌کند', true); }
+        render(); break;
+      case 'user-status': await act('admin.user.setStatus', { userId: nid, status: t.dataset.v }, t.dataset.v === 'approved' ? 'عضویت تأیید شد و به شخص اعلام شد' : 'وضعیت کاربر به‌روز شد').catch(() => {}); break;
       case 'user-role': await act('admin.user.setRole', { userId: nid, role: t.dataset.v }, 'نقش کاربر تغییر کرد').catch(() => {}); break;
       case 'asset-toggle': await act('admin.asset.toggle', { assetId: nid }).catch(() => {}); break;
       case 'asset-edit': {
@@ -1113,6 +1209,9 @@
           const r = await backend.action('deal.request', { orderId: id, amount: d.amount, note: d.note });
           await refresh(); closeModal(); location.hash = `#deal-${r.dealId}`; render(); toast('درخواست ارسال شد؛ منتظر تأیید طرف مقابل باشید'); break;
         }
+        case 'reject-user': await act('admin.user.setStatus', { userId: id, status: 'rejected', reason: d.reason }, 'درخواست رد شد و به متقاضی اعلام شد'); break;
+        case 'block-user': await act('admin.user.setStatus', { userId: id, status: 'blocked', reason: d.reason }, 'حساب مسدود شد'); break;
+        case 'resubmit': await act('account.resubmit', d, 'مشخصات دوباره برای بررسی ارسال شد'); break;
         case 'reject': await act('deal.reject', { dealId: id, reason: d.reason }, 'درخواست رد شد'); break;
         case 'cancel-deal': await act('deal.cancel', { dealId: id, reason: d.reason }, 'معامله لغو شد'); break;
         case 'close-order': await act('order.cancel', { orderId: id }, 'سفارش بسته شد'); break;

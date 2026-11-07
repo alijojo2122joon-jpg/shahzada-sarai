@@ -12,7 +12,8 @@
   const ACTIVITIES = { saraf: 'صراف', zargar: 'زرگر', tajer: 'تاجر', other: 'سایر معامله‌گران' };
   const ORDER_STATUS = { active: 'فعال', filled: 'تکمیل ظرفیت', closed: 'بسته‌شده', cancelled: 'لغوشده', expired: 'منقضی' };
   const DEAL_STATUS = { pending: 'در انتظار پاسخ', accepted: 'در حال انجام', rejected: 'ردشده', cancelled: 'لغوشده', completed: 'تکمیل‌شده' };
-  const USER_STATUS = { pending: 'تأییدنشده', approved: 'تأییدشده', blocked: 'مسدود' };
+  const USER_STATUS = { pending: 'در انتظار بررسی', approved: 'تأییدشده', rejected: 'ردشده', blocked: 'مسدود' };
+  const PROVINCES = ['کابل', 'هرات', 'بلخ', 'قندهار', 'ننگرهار', 'کندز', 'غزنی', 'بامیان', 'بدخشان', 'تخار', 'بغلان', 'پروان', 'لوگر', 'میدان وردک', 'پکتیا', 'خوست', 'هلمند', 'فراه', 'نیمروز', 'جوزجان', 'فاریاب', 'سمنگان', 'سرپل', 'بادغیس', 'غور', 'دایکندی', 'ارزگان', 'زابل', 'پکتیکا', 'کنر', 'لغمان', 'نورستان', 'کاپیسا', 'پنجشیر'];
 
   class EngineError extends Error {
     constructor(message, code) { super(message); this.code = code || 'bad_request'; }
@@ -115,15 +116,16 @@
     const password = String(input.password || '');
     if (password.length < 6) fail('رمز عبور باید حداقل ۶ حرف باشد');
     if (state.users.some((u) => u.phone === phone)) fail('این شماره قبلاً ثبت شده است', 'conflict');
+    const kyc = kycFields(input, { requireAll: state.users.length > 0 });
     const isFirst = state.users.length === 0;
     const user = {
       id: nextId(state, 'user'), name, phone, whatsapp, company, activity,
       role: isFirst ? 'admin' : 'member', status: isFirst ? 'approved' : 'pending',
-      showContact: true, bio: '', createdAt: now, passHash: hashPassword(password),
+      showContact: true, bio: '', createdAt: now, passHash: hashPassword(password), ...kyc,
     };
     state.users.push(user);
     audit(state, now, user.id, 'user.registered', `user:${user.id}`, company);
-    if (!isFirst) notifyAdmins(state, now, `عضو جدید «${company}» منتظر تأیید است.`, '#admin-users');
+    if (!isFirst) notifyAdmins(state, now, `درخواست عضویت جدید: «${company}» از ${kyc.province} — منتظر بررسی شما.`, `#admin-review-${user.id}`);
     state.version++;
     return user;
   }
@@ -133,6 +135,20 @@
     if (!user || !verifyPassword(String(input.password || ''), user.passHash)) fail('شماره یا رمز عبور اشتباه است', 'unauthorized');
     if (user.status === 'blocked') fail('حساب شما مسدود شده است. با مدیر سیستم تماس بگیرید.', 'forbidden');
     return user;
+  }
+
+  function kycFields(p, { requireAll = true } = {}) {
+    const province = str(p.province, 'ولایت', { required: requireAll, max: 30 });
+    if (province && !PROVINCES.includes(province)) fail('ولایت را از فهرست انتخاب کنید');
+    return {
+      province,
+      city: str(p.city, 'شهر / ولسوالی', { required: false, max: 40 }),
+      address: str(p.address, 'آدرس دفتر یا دکان', { required: requireAll, max: 200 }),
+      experience: str(p.experience, 'سابقه کار', { required: false, max: 40 }),
+      guarantorName: str(p.guarantorName, 'نام ضامن', { required: false, max: 80 }),
+      guarantorPhone: normPhone(toLatinDigits(p.guarantorPhone)),
+      about: str(p.about, 'معرفی', { required: false, max: 500 }),
+    };
   }
 
   /* ---------- permission guards ---------- */
@@ -361,14 +377,36 @@
       const u = userById(s, p.userId) || fail('کاربر پیدا نشد', 'not_found');
       if (!USER_STATUS[p.status]) fail('وضعیت نامعتبر');
       if (u.id === me && p.status !== 'approved') fail('نمی‌توانید حساب خودتان را مسدود کنید');
+      const reason = str(p.reason, 'دلیل', { required: p.status === 'rejected', max: 300 });
       u.status = p.status;
-      if (p.status === 'blocked') {
+      u.reviewedAt = now; u.reviewedBy = me;
+      u.statusReason = p.status === 'approved' ? '' : reason;
+      if (p.status === 'blocked' || p.status === 'rejected') {
         for (const o of s.orders) if (o.userId === u.id && o.status === 'active') { o.status = 'closed'; o.updatedAt = now; }
         for (const d of s.deals) if (d.requesterId === u.id && d.status === 'pending') { d.status = 'cancelled'; d.updatedAt = now; }
       }
-      notify(s, now, u.id, p.status === 'approved' ? 'حساب شما تأیید شد. اکنون می‌توانید سفارش ثبت کنید.' :
-        p.status === 'blocked' ? 'حساب شما مسدود شد.' : 'وضعیت حساب شما به «تأییدنشده» تغییر کرد.', '#profile');
-      audit(s, now, me, 'admin.user.status', `user:${u.id}`, p.status);
+      const msg = {
+        approved: '✅ تبریک! حساب شما توسط مدیریت سرای شهزاده تأیید شد. اکنون می‌توانید سفارش ثبت کنید و معامله کنید.',
+        rejected: `❌ درخواست عضویت شما رد شد. دلیل: ${reason}. می‌توانید مشخصات را اصلاح کرده و دوباره ارسال کنید.`,
+        blocked: `⛔ حساب شما مسدود شد.${reason ? ' دلیل: ' + reason : ''}`,
+        pending: 'وضعیت حساب شما به «در انتظار بررسی» تغییر کرد.',
+      }[p.status];
+      notify(s, now, u.id, msg, '#profile');
+      audit(s, now, me, 'admin.user.status', `user:${u.id}`, p.status + (reason ? ': ' + reason : ''));
+      return { ok: true };
+    },
+    'account.resubmit'(s, me, p, now) {
+      const u = userById(s, me) || fail('ابتدا وارد حساب شوید', 'unauthorized');
+      if (u.status !== 'rejected') fail('فقط درخواست ردشده قابل ارسال دوباره است');
+      if (p.name !== undefined) u.name = str(p.name, 'نام', { max: 80 });
+      if (p.company !== undefined) u.company = str(p.company, 'نام صرافی', { max: 80 });
+      if (p.whatsapp !== undefined) u.whatsapp = normPhone(toLatinDigits(p.whatsapp)) || u.phone;
+      if (p.activity !== undefined && ACTIVITIES[p.activity]) u.activity = p.activity;
+      Object.assign(u, kycFields(p));
+      u.status = 'pending'; u.statusReason = ''; u.resubmittedAt = now;
+      notifyAdmins(s, now, `«${displayName(u)}» مشخصات خود را اصلاح و دوباره برای بررسی فرستاد.`, `#admin-review-${u.id}`);
+      notify(s, now, u.id, 'درخواست شما دوباره برای مدیریت ارسال شد. نتیجه بررسی به شما اعلام می‌شود.', '#profile');
+      audit(s, now, me, 'user.resubmit', `user:${u.id}`, '');
       return { ok: true };
     },
     'admin.user.setRole'(s, me, p, now) {
@@ -438,11 +476,16 @@
   }
 
   /* ---------- per-user view (what a given user is allowed to see) ---------- */
-  function publicUser(u, { contact = false, self = false } = {}) {
+  function publicUser(u, { contact = false, self = false, kyc = false } = {}) {
     if (!u) return null;
     const out = { id: u.id, name: u.name, company: u.company, activity: u.activity, status: u.status, role: u.role, createdAt: u.createdAt, bio: u.bio || '' };
     if (self || (contact && u.showContact)) { out.phone = u.phone; out.whatsapp = u.whatsapp; }
     if (self) out.showContact = u.showContact;
+    if (self || kyc) {
+      Object.assign(out, { province: u.province || '', city: u.city || '', address: u.address || '', experience: u.experience || '',
+        guarantorName: u.guarantorName || '', guarantorPhone: u.guarantorPhone || '', about: u.about || '',
+        statusReason: u.statusReason || '', reviewedAt: u.reviewedAt || null, resubmittedAt: u.resubmittedAt || null });
+    }
     return out;
   }
 
@@ -487,7 +530,7 @@
     };
     if (isAdmin) {
       view.admin = {
-        users: state.users.map((u) => publicUser(u, { contact: true })),
+        users: state.users.map((u) => publicUser(u, { contact: true, kyc: true })),
         reports: state.reports,
         audit: state.audit.slice(-300).reverse(),
         auditIntact: verifyAudit(state),
@@ -510,7 +553,8 @@
   function seed(state, { now, hashPassword }) {
     const H = 3600e3;
     const mk = (name, phone, company, activity, role = 'member', status = 'approved') => {
-      const u = { id: nextId(state, 'user'), name, phone, whatsapp: phone, company, activity, role, status, showContact: true, bio: '', createdAt: now - 30 * 24 * H, passHash: hashPassword(role === 'admin' ? 'admin123' : '123456') };
+      const u = { id: nextId(state, 'user'), name, phone, whatsapp: phone, company, activity, role, status, showContact: true, bio: '', createdAt: status === 'pending' ? now - 2 * H : now - 30 * 24 * H,
+        province: 'کابل', city: 'کابل', address: 'سرای شهزاده، منزل دوم، دکان ' + (10 + state.users.length), experience: (3 + state.users.length * 2) + ' سال', guarantorName: role === 'admin' ? '' : 'حاجی محمود', guarantorPhone: role === 'admin' ? '' : '0799000111', about: '', passHash: hashPassword(role === 'admin' ? 'admin123' : '123456') };
       state.users.push(u); return u;
     };
     const admin = mk('مدیر سیستم', '0700000000', 'مدیریت سرای شهزاده', 'other', 'admin');
@@ -568,7 +612,7 @@
   }
 
   return {
-    ACTIVITIES, ORDER_STATUS, DEAL_STATUS, USER_STATUS, EngineError,
+    ACTIVITIES, ORDER_STATUS, DEAL_STATUS, USER_STATUS, PROVINCES, EngineError,
     emptyState, register, login, dispatch, buildView, seed, verifyAudit, sweep, actions: Object.keys(actions),
   };
 });

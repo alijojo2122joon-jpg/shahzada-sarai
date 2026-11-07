@@ -82,10 +82,23 @@ function client(base) {
   d = (await b1.state()).deals.find((x) => x.id === d1);
   assert.equal(d.status, 'completed'); pass('deal completes only after both sides confirm');
 
-  await fresh.call('/api/register', { name: 'تست', phone: '0799999999', company: 'صرافی تست', activity: 'saraf', password: '123456' });
+  const noKyc = await client(base).call('/api/register', { name: 'x', phone: '0788888888', company: 'x', activity: 'saraf', password: '123456' });
+  assert.equal(noKyc.status, 400); pass('registration requires province and office address');
+  await fresh.call('/api/register', { name: 'تست', phone: '0799999999', company: 'صرافی تست', activity: 'saraf', password: '123456', province: 'هرات', address: 'سرای شهزاده دکان ۵', guarantorName: 'ضامن', guarantorPhone: '0777' });
+  let adm = await admin.state();
+  const applicant = adm.admin.users.find((u) => u.phone === '0799999999');
+  assert(applicant.province === 'هرات' && applicant.address && applicant.status === 'pending'); pass('admin sees full applicant details');
+  assert(adm.notifications.some((n) => n.text.includes('صرافی تست'))); pass('admin notified of new registration');
+  assert.equal((await admin.act('admin.user.setStatus', { userId: applicant.id, status: 'rejected' })).status, 400); pass('rejection requires a reason');
+  await admin.act('admin.user.setStatus', { userId: applicant.id, status: 'rejected', reason: 'آدرس ناقص است' });
+  let fv = await fresh.state();
+  assert(fv.me.status === 'rejected' && fv.me.statusReason === 'آدرس ناقص است' && fv.notifications[0].text.includes('رد شد')); pass('applicant notified of rejection with reason');
+  await fresh.act('account.resubmit', { province: 'کابل', address: 'سرای شهزاده، منزل دوم، دکان ۵' });
+  assert.equal((await fresh.state()).me.status, 'pending'); pass('applicant can fix details and resubmit');
   assert.equal((await fresh.act('order.create', { assetId: usd.id, side: 'buy', amount: 1, price: 1 })).status, 403); pass('unapproved member cannot trade');
   const newId = (await admin.state()).admin.users.find((u) => u.phone === '0799999999').id;
   await admin.act('admin.user.setStatus', { userId: newId, status: 'approved' });
+  assert((await fresh.state()).notifications[0].text.includes('تأیید شد')); pass('applicant notified of approval');
   assert.equal((await fresh.act('order.create', { assetId: usd.id, side: 'buy', amount: 1000, price: 65.1 })).status, 200); pass('admin approval unlocks trading');
   assert.equal((await b1.act('admin.user.setStatus', { userId: newId, status: 'blocked' })).status, 403); pass('non-admin cannot use admin actions');
 

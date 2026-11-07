@@ -196,11 +196,12 @@ async function api(req, res, url) {
 
 function serveStatic(req, res, url) {
   let rel = decodeURIComponent(url.pathname);
-  if (rel === ADMIN_PATH || rel === ADMIN_PATH + '/') {
+  if (rel === ADMIN_PATH + '/') { res.writeHead(301, { Location: ADMIN_PATH }); return res.end(); }
+  if (rel === ADMIN_PATH) {
     return fs.readFile(path.join(__dirname, 'public', 'index.html'), 'utf8', (err, html) => {
       if (err) { res.writeHead(500); return res.end(); }
       res.writeHead(200, { 'Content-Type': MIME['.html'], 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex, nofollow', ...SECURITY_HEADERS });
-      res.end(html.replace('<html lang="fa" dir="rtl">', '<html lang="fa" dir="rtl" data-mode="admin">').replace('<head>', '<head>\n  <base href="/">').replace('<link rel="manifest" href="manifest.webmanifest">', ''));
+      res.end(html.replace('<html lang="fa" dir="rtl">', '<html lang="fa" dir="rtl" data-mode="admin">').replace('<link rel="manifest" href="manifest.webmanifest">', ''));
     });
   }
   if (rel === '/') rel = '/index.html';
