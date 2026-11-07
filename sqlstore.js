@@ -17,6 +17,7 @@ const KINDS = {
   rateHistory: [['key', 'at'], ['at']],
   tgMessages: [['sourceId', 'msgId'], ['status'], ['channel']],
   sources: [['channel'], ['enabled']],
+  alerts: [['key', 'active'], ['userId', 'active'], ['userId']],
   reports: [['status'], ['reporterId', 'createdAt']],
   audit: [],
 };

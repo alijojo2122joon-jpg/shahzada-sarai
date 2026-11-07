@@ -529,7 +529,7 @@
 
   // ---------- text normalisation ----------
   function normText(s) {
-    return toLatinDigits(String(s || ''))
+    return toLatinDigits(String(s || '').replace(/٫/g, '.').replace(/٬/g, ','))
       .replace(/[يى]/g, 'ی').replace(/ك/g, 'ک').replace(/ۍ/g, 'ی').replace(/[ئ]/g, 'ی').replace(/ة/g, 'ه')
       .replace(/ـ/g, '').replace(/[‌‍‎‏]/g, ' ')
       .replace(/[^\p{L}\p{N}.,:/\s-]/gu, ' ')
@@ -607,16 +607,22 @@
       const market = b.city || findCity(body) || defaultMarket;
       const settlement = findSettlement(body) || 'cash';
       let buy = null, sell = null, odd = false;
-      const take = (kw) => {
-        const after = new RegExp(`${kw}\\s*:?\\s*(\\d[\\d.,]*\\d|\\d)`).exec(body);
-        const before = new RegExp(`(\\d[\\d.,]*\\d|\\d)\\s*${kw}`).exec(body);
-        const m = after || before;
-        if (!m) return null;
-        const n = parseNum(m[1], quote); if (n.odd) odd = true;
-        return isFinite(n.value) && n.value > 0 ? n.value : null;
-      };
-      buy = take('(?:خرید|buy)');
-      sell = take('(?:فروش|sell)');
+      // Labelled numbers: keyword followed by a number; a number may serve only one keyword.
+      const NUM = '(\\d[\\d.,]*\\d|\\d)(?![\\d.,]*[A-Za-z])';
+      const used = new Set();
+      const found = {};
+      for (const [side, kw] of [['buy', '(?:خرید|buy)'], ['sell', '(?:فروش|sell)']]) {
+        const m = new RegExp(`${kw}\\s*:?\\s*${NUM}`).exec(body);
+        if (m) { found[side] = { raw: m[1], pos: m.index + m[0].length - m[1].length }; used.add(found[side].pos); }
+      }
+      for (const [side, kw] of [['buy', '(?:خرید|buy)'], ['sell', '(?:فروش|sell)']]) {
+        if (found[side]) continue;
+        const m = new RegExp(`${NUM}\\s*${kw}`).exec(body);
+        if (m && !used.has(m.index)) { found[side] = { raw: m[1], pos: m.index }; used.add(m.index); }
+      }
+      const val = (f) => { if (!f) return null; const n = parseNum(f.raw, quote); if (n.odd) odd = true; return isFinite(n.value) && n.value > 0 ? n.value : null; };
+      buy = val(found.buy); sell = val(found.sell);
+      if (/\d[\d.,]*[eE][+-]?\d/.test(body)) { odd = true; }
       if (buy == null && sell == null) {
         const nums = body.match(NUM_RE) || [];
         issues.push(nums.length ? 'نوع نرخ (خرید یا فروش) مشخص نیست' : 'عدد معتبر یافت نشد');
@@ -636,11 +642,17 @@
     const issues = [];
     const r = S.one('rates', { key: rateKey(item.code, item.quote, item.market, item.settlement) });
     if (item.buy != null && item.sell != null && (item.sell - item.buy) / item.buy > RATE_RULES.maxSpread) issues.push(`فاصله خرید و فروش بیش از ${RATE_RULES.maxSpread * 100}٪`);
-    if (r) {
+    if (r && (r.buy != null || r.sell != null)) {
       for (const side of ['buy', 'sell']) {
         const prev = r[side], v = item[side];
         if (prev && v != null && Math.abs(v - prev) / prev > RATE_RULES.maxJump) issues.push(`تغییر ${side === 'buy' ? 'خرید' : 'فروش'} بیش از ${RATE_RULES.maxJump * 100}٪ نسبت به نرخ قبلی`);
       }
+    } else {
+      // New instrument: accept only if consistent with the same currency in another city, otherwise ask the admin once.
+      const refs = S.find('rates', { code: item.code, quote: item.quote }).filter((x) => !x.hidden && (x.buy != null || x.sell != null));
+      const v = item.sell ?? item.buy;
+      const ok = refs.some((x) => { const ref = x.sell ?? x.buy; return ref && Math.abs(v - ref) / ref <= 0.03; });
+      if (!ok) issues.push('نرخ جدید است؛ تأیید اولیه مدیر لازم است');
     }
     return { issues, current: r, stale: !!(r && postedAt && r.updatedAt && postedAt <= r.updatedAt) };
   }
@@ -661,6 +673,15 @@
     r.manual = kind === 'manual'; r.currency = item.quote;
     S.put('rates', r);
     S.put('rateHistory', { key, assetId: asset.id, at: when, buy: item.buy, sell: item.sell, source, kind, ref: sourceRef || null, by: actorId || null });
+    // Price alerts set by members for this rate.
+    for (const al of S.find('alerts', { key, active: true }, { limit: 5000 })) {
+      const v = item[al.side];
+      if (v == null) continue;
+      if ((al.op === 'gte' && v >= al.value) || (al.op === 'lte' && v <= al.value)) {
+        al.active = false; al.firedAt = when; al.firedValue = v; S.put('alerts', al);
+        notify(S, ctx, al.userId, `هشدار قیمت: ${asset.name} (${item.market}) — ${al.side === 'buy' ? 'خرید' : 'فروش'} به ${fmtN(v)} رسید (شرط: ${al.op === 'gte' ? '≥' : '≤'} ${fmtN(al.value)}).`, '#rates');
+      }
+    }
     market(ctx);
     return r;
   }
@@ -713,6 +734,24 @@
   }
 
   const rateActions = {
+    'alert.create'(S, me, p, ctx) {
+      requireUser(S, me);
+      const r = S.one('rates', { key: String(p.key || '') });
+      if (!r || r.hidden) fail('نرخ انتخاب‌شده معتبر نیست.');
+      const side = p.side === 'buy' ? 'buy' : 'sell';
+      const op = p.op === 'lte' ? 'lte' : 'gte';
+      const value = num(p.value, 'قیمت هشدار');
+      if (S.count('alerts', { userId: me, active: true }) >= 20) fail('حداکثر ۲۰ هشدار فعال مجاز است.');
+      const al = S.put('alerts', { userId: me, key: r.key, code: r.code, market: r.market, side, op, value, active: true, createdAt: ctx.now });
+      return { alertId: al.id };
+    },
+    'alert.delete'(S, me, p, ctx) {
+      requireUser(S, me);
+      const al = getOr(S, 'alerts', p.id, 'هشدار یافت نشد.');
+      if (al.userId !== me) fail('دسترسی ندارید.', 'forbidden');
+      al.active = false; al.deleted = true; S.put('alerts', al);
+      return { ok: true };
+    },
     // Manual entry or correction by an admin; the rate is marked as manually edited.
     'admin.rate.set'(S, me, p, ctx) {
       requireAdmin(S, me);
@@ -826,6 +865,37 @@
     for (let i = 0; i < max; i++) { const r = rows[Math.floor(i * step)]; out.push({ at: r.at, buy: r.buy, sell: r.sell, kind: r.kind, source: r.source }); }
     out.push(rows[rows.length - 1]);
     return out;
+  }
+  // 7-day mini trend per rate (mid price), for table sparklines.
+  function sparks(S, now, points = 24) {
+    const out = {};
+    for (const r of S.find('rates', {}, { limit: 1000 })) {
+      if (r.hidden || !r.key || r.key.startsWith('legacy|')) continue;
+      const h = S.find('rateHistory', { key: r.key, at: { gte: now - 7 * 864e5 } }, { order: 'at', limit: 5000 });
+      const mids = []; let lb = null, ls = null;
+      for (const x of h) { if (x.buy != null) lb = x.buy; if (x.sell != null) ls = x.sell; const m = lb != null && ls != null ? (lb + ls) / 2 : (ls ?? lb); if (m != null) mids.push(m); }
+      if (mids.length < 2) continue;
+      const step = Math.max(1, mids.length / points), arr = [];
+      for (let i = 0; i < mids.length; i += step) arr.push(round(mids[Math.floor(i)]));
+      arr.push(round(mids[mids.length - 1]));
+      out[r.key] = arr;
+    }
+    return out;
+  }
+  // Session statistics for one rate: open, high, low, previous close (Kabul day) and 30-day range, per side.
+  function rateStats(S, key, now) {
+    const day = 864e5, off = 270 * 60e3, sod = Math.floor((now + off) / day) * day - off;
+    const today = S.find('rateHistory', { key, at: { gte: sod } }, { order: 'at', limit: 5000 });
+    const before = S.find('rateHistory', { key, at: { lt: sod } }, { order: '-at', limit: 50 });
+    const month = S.find('rateHistory', { key, at: { gte: now - 30 * day } }, { order: 'at', limit: 20000 });
+    const side = (k) => {
+      const t = today.map((x) => x[k]).filter((v) => v != null);
+      const prev = (before.find((x) => x[k] != null) || {})[k] ?? null;
+      const m = month.map((x) => x[k]).filter((v) => v != null);
+      return { open: t.length ? t[0] : null, high: t.length ? Math.max(...t) : null, low: t.length ? Math.min(...t) : null, last: t.length ? t[t.length - 1] : null,
+        prevClose: prev, changes: t.length, low30: m.length ? Math.min(...m) : null, high30: m.length ? Math.max(...m) : null };
+    };
+    return { buy: side('buy'), sell: side('sell'), updatesToday: today.length };
   }
   function adminMessages(S, actorId, { status = '', offset = 0 } = {}) {
     requireAdmin(S, actorId);
@@ -950,6 +1020,7 @@
       assets, rates, rateHistory, orders, deals, messages, users, stats: stats(S, now),
       notifications: me ? S.find('notifications', { userId: me.id }, { order: '-id', limit: LIMITS.notifications }) : [],
       unread: me ? S.count('notifications', { userId: me.id, read: false }) : 0,
+      alerts: me ? S.find('alerts', { userId: me.id }, { order: '-id', limit: 40 }).filter((a) => !a.deleted) : [],
       serverTime: now,
     };
     if (isAdmin) {
@@ -1042,7 +1113,13 @@
         [126569, 8, 9, 'دالر به افغانی 🇺🇲 🇦🇫 کابل\nخرید 64.88 🔺💵🔻 فروش 64.90'],
         [126570, 8, 26, 'دالر به افغانی 🇺🇲 🇦🇫 کابل\nخرید 64.90 🔺💵🔻 فروش 64.92'],
         [126571, 8, 46, 'دالر به افغانی 🇺🇲 🇦🇫 کابل\nخرید 64.92 🔺💵🔻 فروش 64.94'],
-      ].forEach(([id, h, m, text]) => ingestMessage(S, { now }, src, { msgId: id, postedAt: at(h, m), text }));
+      ].sort((x, y) => (x[0] === 126569 ? -1 : y[0] === 126569 ? 1 : 0)).forEach(([id, h, m, text]) => {
+        ingestMessage(S, { now }, src, { msgId: id, postedAt: at(h, m), text });
+        if (id === 126569) { // the initial reference rate approved by the admin
+          const msg = S.one('tgMessages', { msgId: '126569' });
+          actions['admin.message.apply'](S, 1, { id: msg.id, items: msg.items.map((x) => ({ ...x })) }, { now, scope: 'admin' });
+        }
+      });
     }
     const ord = (u, side, code, amount, price, note = '', ageH = 1) => S.put('orders', {
       userId: u.id, side, assetId: A[code].id, amount, remaining: amount, minAmount: 0, price, priceCurrency: A[code].priceCurrency,
@@ -1073,7 +1150,7 @@
 
   return {
     ACTIVITIES, ORDER_STATUS, DEAL_STATUS, USER_STATUS, PROVINCES, SENSITIVE, RATE_GUARD, EngineError,
-    MemoryStore, matchWhere, register, createAdmin, findByPhone, parseRateMessage, ingestMessage, rateHistory, adminMessages, ensureCurrencies, ensureDefaultSource, rateKey, MARKETS, QUOTES, SETTLEMENT, dispatch, buildView, adminUsers, seed, verifyAudit, sweep, chainHash,
+    MemoryStore, matchWhere, register, createAdmin, findByPhone, parseRateMessage, ingestMessage, rateHistory, adminMessages, sparks, rateStats, ensureCurrencies, ensureDefaultSource, rateKey, MARKETS, QUOTES, SETTLEMENT, dispatch, buildView, adminUsers, seed, verifyAudit, sweep, chainHash,
     actions: Object.keys(actions),
   };
 });

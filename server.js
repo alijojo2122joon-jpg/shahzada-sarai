@@ -79,7 +79,7 @@ function parseTelegramHtml(html) {
   const out = [];
   for (const part of html.split('tgme_widget_message_wrap').slice(1)) {
     const post = /data-post="[^"\/]+\/(\d+)"/.exec(part);
-    const txt = /<div class="tgme_widget_message_text[^"]*"[^>]*>([\s\S]*?)<\/div>/.exec(part);
+    const txt = /<div class="tgme_widget_message_text js-message_text[^"]*"[^>]*>([\s\S]*?)<\/div>/.exec(part); // main text, not a quoted reply
     if (!post || !txt) continue;
     const tm = /<time[^>]*datetime="([^"]+)"/.exec(part);
     const text = decodeHtml(txt[1].replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '')).trim();
@@ -250,6 +250,9 @@ const STATUS = { bad_request: 400, unauthorized: 401, forbidden: 403, not_found:
 const tooMany = () => new Engine.EngineError('تعداد درخواست‌ها زیاد است. کمی بعد تلاش کنید.', 'too_many');
 
 let guestCache = { at: 0, body: null };
+let sparkCache = { at: 0, body: {} };
+let publicCache = { at: 0, body: null };
+const round6 = (n) => Math.round(n * 1e6) / 1e6;
 
 /* ---------- API ---------- */
 async function api(req, res, url) {
@@ -281,7 +284,30 @@ async function api(req, res, url) {
       const startOfDay = Math.floor((now + off) / day) * day - off;
       const periods = { today: [startOfDay, now], yesterday: [startOfDay - day, startOfDay], '7d': [now - 7 * day, now], '30d': [now - 30 * day, now], '90d': [now - 90 * day, now] };
       const [from, to] = periods[url.searchParams.get('period')] || periods['7d'];
-      return send(req, res, 200, { key, from, to, points: Engine.rateHistory(S, key, { from, to }) });
+      const points = Engine.rateHistory(S, key, { from, to, max: url.searchParams.get('format') === 'csv' ? 20000 : 600 });
+      if (url.searchParams.get('format') === 'csv') {
+        const iso = (t) => new Date(t).toISOString();
+        const csv = '\ufefftime_utc,buy,sell,type,source\n' + points.map((p2) => [iso(p2.at), p2.buy ?? '', p2.sell ?? '', p2.kind || '', p2.source || ''].join(',')).join('\n');
+        res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="rates-${key.split('|')[0]}.csv"`, 'Cache-Control': 'no-store', ...SECURITY_HEADERS });
+        return res.end(csv);
+      }
+      return send(req, res, 200, { key, from, to, points, stats: Engine.rateStats(S, key, now) });
+    }
+    if (p === '/api/rates/sparks') {
+      if (now - sparkCache.at > 60e3) sparkCache = { at: now, body: Engine.sparks(S, now) };
+      return send(req, res, 200, sparkCache.body);
+    }
+    // Public read-only API for other applications (CORS open, cached).
+    if (p === '/api/public/rates') {
+      if (now - publicCache.at > 15e3) {
+        const assets = Object.fromEntries(S.find('assets', {}).map((a) => [a.code, a]));
+        publicCache = { at: now, body: { source: 'Shahzada Sarai, Kabul', generatedAt: new Date(now).toISOString(), rates: S.find('rates', {}, { limit: 1000 })
+          .filter((r) => !r.hidden && r.key && !r.key.startsWith('legacy|') && (r.buy != null || r.sell != null))
+          .map((r) => ({ code: r.code, name: (assets[r.code] || {}).name || r.code, quote: r.quote, market: r.market, settlement: r.settlement, buy: r.buy, sell: r.sell,
+            buyChange: r.buy != null && r.prevBuy != null ? round6(r.buy - r.prevBuy) : null, sellChange: r.sell != null && r.prevSell != null ? round6(r.sell - r.prevSell) : null,
+            updatedAt: new Date(r.updatedAt).toISOString(), entry: r.kind === 'manual' ? 'manual' : 'automatic' })) } };
+      }
+      return send(req, res, 200, publicCache.body, { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'public, max-age=15' });
     }
     if (p === '/api/admin/messages') {
       if (sess.scope !== 'admin' || !sess.uid) throw new Engine.EngineError('دسترسی ندارید.', 'forbidden');
@@ -394,7 +420,7 @@ async function api(req, res, url) {
     const ctx = { now, scope: sess.scope };
     const result = S.tx(() => Engine.dispatch(S, sess.uid, type, body.payload, ctx));
     publish(ctx);
-    if (ctx.market) guestCache.at = 0;
+    if (ctx.market) { guestCache.at = 0; publicCache.at = 0; sparkCache.at = 0; }
     return send(req, res, 200, { ok: true, result });
   }
   return send(req, res, 404, { error: 'یافت نشد.' });

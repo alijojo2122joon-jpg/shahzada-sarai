@@ -120,15 +120,18 @@ function client(base, scope = 'user') {
   assert(rate.buy === 65.4 && rate.sell === 65.5); pass('public sees only the verified rate');
 
   /* --- Telegram rates --- */
-  const html = '<div class="tgme_widget_message_wrap js-widget_message_wrap"><div class="tgme_widget_message" data-post="kabul_dalarr_Toman/126571"><div class="tgme_widget_message_text js-message_text" dir="auto">دالر به افغانی <i class="emoji" style=""><b>🇺🇲</b></i> کابل<br/>خرید 64.92 &#33; فروش 64.94</div><a class="tgme_widget_message_date"><time datetime="2026-11-07T04:16:00+00:00" class="time">08:46</time></a></div></div>';
+  const html = '<div class="tgme_widget_message_wrap js-widget_message_wrap"><div class="tgme_widget_message" data-post="kabul_dalarr_Toman/126571"><a class="tgme_widget_message_reply"><div class="tgme_widget_message_text js-message_reply_text">quoted old text</div></a><div class="tgme_widget_message_text js-message_text" dir="auto">دالر به افغانی <i class="emoji" style=""><b>🇺🇲</b></i> کابل<br/>خرید 64.92 &#33; فروش 64.94</div><a class="tgme_widget_message_date"><time datetime="2026-11-07T04:16:00+00:00" class="time">08:46</time></a></div></div>';
   const tm = parseTelegramHtml(html);
-  assert(tm.length === 1 && tm[0].msgId === '126571' && tm[0].text.includes('خرید 64.92') && tm[0].postedAt === Date.parse('2026-11-07T04:16:00Z')); pass('channel page parsed (id, text, time)');
+  assert(tm.length === 1 && tm[0].msgId === '126571' && tm[0].text.includes('خرید 64.92') && !tm[0].text.includes('quoted') && tm[0].postedAt === Date.parse('2026-11-07T04:16:00Z')); pass('channel page parsed (id, text, time; quoted replies ignored)');
   {
     const M = Engine.MemoryStore(); const t0 = Date.now();
     Engine.ensureCurrencies(M); Engine.ensureDefaultSource(M, { now: t0 });
     const src = M.one('sources', {});
     const ing = (id, min, text) => Engine.ingestMessage(M, { now: t0 }, src, { msgId: id, postedAt: t0 + min * 60e3, text });
-    ing(1, 1, 'دالر به افغانی 🇺🇲 🇦🇫 کابل\nخرید 64.88 🔺💵🔻 فروش 64.90');
+    const adm = Engine.createAdmin(M, { phone: '0700000999', password: 'x'.repeat(10), now: t0 }, { hashPassword: (x) => x });
+    assert.equal(ing(1, 1, 'دالر به افغانی 🇺🇲 🇦🇫 کابل\nخرید 64.88 🔺💵🔻 فروش 64.90').status, 'review'); pass('first rate of a new instrument needs admin approval');
+    const first = M.one('tgMessages', { msgId: '1' });
+    Engine.dispatch(M, adm.id, 'admin.message.apply', { id: first.id, items: first.items }, { now: t0, scope: 'admin' });
     let r = M.one('rates', { key: 'USD|AFN|کابل|cash' });
     assert(r && r.buy === 64.88 && r.sell === 64.9); pass('buy and sell extracted into separate fields');
     ing(2, 2, 'دالر به افغانی کابل\nخرید 64.92 فروش 64.94');
@@ -140,10 +143,19 @@ function client(base, scope = 'user') {
     assert.equal(ing(4, 4, 'دالر به افغانی کابل\nفروش 64.90 خرید 64.95').status, 'review'); pass('buy above sell (possible swap) goes to review');
     assert.equal(ing(5, 5, 'هرات\nدالر به تومان\n258.500 نرخ نقدی').status, 'review'); pass('unlabelled rate goes to review (no guessing)');
     ing(6, 6, 'کلدار به افغانی کابل\nخرید 2.30');
+    const m6 = M.one('tgMessages', { msgId: '6' });
+    Engine.dispatch(M, adm.id, 'admin.message.apply', { id: m6.id, items: m6.items }, { now: t0, scope: 'admin' });
     r = M.one('rates', { key: 'PKR|AFN|کابل|cash' });
     assert(r.buy === 2.3 && r.sell === null); pass('buy-only message stores buy only');
     const it = Engine.parseRateMessage('دالر به تومان هرات\nخرید 258.500 فروش 259.000', { assets: M.find('assets', {}) })[0];
     assert(it.quote === 'IRT' && it.buy === 258500 && it.sell === 259000); pass('toman thousands separators parsed correctly');
+    assert.equal(ing(7, 7, 'دالر به افغانی کندهار\nخرید 64.95 فروش 64.97').status, 'applied'); pass('new city accepted automatically when consistent with another city');
+    const fa = Engine.parseRateMessage('دالر به افغانی کابل خرید ۶۴٫۹۲ فروش ۶۴٫۹۴', { assets: M.find('assets', {}) })[0];
+    assert(fa.buy === 64.92 && fa.sell === 64.94); pass('Persian digits and decimal separator parsed exactly');
+    const ex = Engine.parseRateMessage('دالر به افغانی خرید 1e9 فروش 1e10', { assets: M.find('assets', {}) })[0];
+    assert(ex.issues.length > 0); pass('malformed numbers flagged, never published');
+    const ns = Engine.parseRateMessage('دالر به افغانی کابل\nخرید 64.90 فروش', { assets: M.find('assets', {}) })[0];
+    assert(ns.buy === 64.9 && ns.sell === null); pass('a number is never reused for both buy and sell');
     const kd = Engine.parseRateMessage('دالر به افغانی 🇺🇲 🇦🇫 لوی کندهار\nخرید 64.97 🔺💵🔻 فروش 65.00', { assets: M.find('assets', {}) })[0];
     assert(kd.market === 'کندهار' && kd.buy === 64.97 && kd.sell === 65); pass('city detected (Kandahar)');
   }

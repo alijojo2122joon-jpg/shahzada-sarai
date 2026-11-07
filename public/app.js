@@ -64,6 +64,7 @@
     totpEnable(code, password) { return this.req('/api/admin/2fa/enable', { code, password }); },
     totpDisable(code, password) { return this.req('/api/admin/2fa/disable', { code, password }); },
     rateHistory(key, period) { return this.req('/api/rates/history?' + qs({ key, period })); },
+    sparks() { return this.req('/api/rates/sparks'); },
     adminMessages(params) { return this.req('/api/admin/messages?' + qs(params)); },
     sourceFetch(sourceId) { return this.req('/api/admin/source/fetch', { sourceId }); },
     subscribe(onMe, onMarket) {
@@ -127,10 +128,11 @@
         const now = Date.now(), day = 864e5, off = 270 * 60e3, sod = Math.floor((now + off) / day) * day - off;
         const P = { today: [sod, now], yesterday: [sod - day, sod], '7d': [now - 7 * day, now], '30d': [now - 30 * day, now], '90d': [now - 90 * day, now] };
         const [from, to] = P[period] || P['7d'];
-        return { key, from, to, points: E.rateHistory(this.S, key, { from, to }) };
+        return { key, from, to, points: E.rateHistory(this.S, key, { from, to }), stats: E.rateStats(this.S, key, now) };
       });
     },
     adminMessages(params) { return this.wrap(() => E.adminMessages(this.S, this.uid, params)); },
+    sparks() { return this.wrap(() => E.sparks(this.S, Date.now())); },
     sourceFetch() { return Promise.reject(new ApiError('در نسخه آزمایشی دسترسی به تلگرام ممکن نیست. از «ورود دستی پیام» استفاده کنید.')); },
     subscribe(onMe) {
       window.addEventListener('storage', (e) => {
@@ -150,7 +152,8 @@
     members: { status: 'pending', q: '', list: null, total: 0, loading: false, offset: 0 },
     adminLogin: { need2fa: false, phone: '', password: '' },
     totp: null,
-    ratesView: { market: 'کابل', q: '', sort: 'popular', key: null, period: '7d', hist: null, histFor: null, loading: null },
+    ratesView: { market: 'کابل', q: '', sort: 'popular', key: null, period: '7d', hist: null, histFor: null, loading: null, chart: 'line', cside: 'sell', stats: null },
+    conv: { amount: '1000', from: 'USD', to: 'AFN' }, sparks: {}, sparksAt: 0,
     adminRates: { msgs: null, status: null, filter: '', loading: false, total: 0 },
   };
   const asset = (id) => view.assets.find((a) => a.id === id) || { code: '?', name: '?', unit: '' };
@@ -406,6 +409,8 @@
     if (entering) countUp();
     const chat = document.querySelector('.chat'); if (chat) chat.scrollTop = chat.scrollHeight;
     afterRender(r);
+    attachCrosshair();
+    rememberTicks();
   }
   function countUp() {
     document.querySelectorAll('[data-count]').forEach((el) => {
@@ -563,6 +568,7 @@
           <div><span class="small muted">بالاترین خرید</span><div class="num" style="color:var(--buy);font-weight:800">${b.bid != null ? fmt(b.bid) : '—'}</div></div>
           <div><span class="small muted">پایین‌ترین فروش</span><div class="num" style="color:var(--sell);font-weight:800">${b.ask != null ? fmt(b.ask) : '—'}</div></div>
         </div></div>`).join('')}</div>` : ''}
+    ${f.asset ? depthPanel(Number(f.asset)) : ''}
     <div class="card">
       <div class="filters">
         <select class="input" data-filter="asset"><option value="">همه دارایی‌ها</option>${view.assets.filter((a) => a.active).map((a) => `<option value="${a.id}" ${String(a.id) === f.asset ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select>
@@ -1027,6 +1033,9 @@
       rows = rows.filter((x) => [x.a.name, x.a.code, ...(x.a.aliases || [])].some((v) => String(v).toLowerCase().includes(q)));
     }
     rows = sortRows(rows, compact ? 'popular' : rv.sort);
+    const wl = watch.get();
+    rows = [...rows.filter((x) => x.r && wl.includes(x.r.key)), ...rows.filter((x) => !(x.r && wl.includes(x.r.key)))];
+    loadSparks();
     const last = liveRates().filter((r) => r.market === mk).reduce((m, r) => Math.max(m, r.updatedAt || 0), 0);
     return `<section class="card official glow aura">
       <div class="official-head">
@@ -1039,14 +1048,15 @@
         <label class="search-pill" style="flex:1;min-width:220px">${orb(SEARCH)}<input data-rates="q" placeholder="جستجوی نام یا نماد ارز" value="${esc(rv.q)}"></label>
         <select class="input" data-rates="sort" style="width:auto">${[['popular', 'پرمعامله‌ها'], ['name', 'نام ارز'], ['up', 'بیشترین افزایش'], ['down', 'بیشترین کاهش']].map(([v, l]) => `<option value="${v}" ${rv.sort === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
       </div>`}
-      <div class="table-wrap"><table class="data responsive official-table"><thead><tr><th>ارز</th><th>نماد</th><th>قیمت خرید</th><th>قیمت فروش</th><th>تغییرات</th><th>آخرین به‌روزرسانی</th></tr></thead><tbody>
+      <div class="table-wrap"><table class="data responsive official-table"><thead><tr><th>ارز</th><th>نماد</th><th>قیمت خرید</th><th>قیمت فروش</th><th>تغییرات</th><th>روند ۷ روز</th><th>آخرین به‌روزرسانی</th></tr></thead><tbody>
         ${rows.map(({ r, a }) => `<tr class="clickable ${r && rv.key === r.key && !compact ? 'sel' : ''}" ${r ? `data-act="rate-open" data-key="${esc(r.key)}"` : ''}>
-          <td class="cell-main">${assetChip(a)}</td>
+          <td class="cell-main">${r ? `<button class="star ${wl.includes(r.key) ? 'on' : ''}" data-act="watch" data-key="${esc(r.key)}" aria-label="فهرست منتخب">★</button>` : ''}${assetChip(a)}</td>
           <td data-l="نماد"><b class="ltr">${esc(a.code)}</b><div class="muted small">به ${esc(quoteLabel(r ? r.quote : 'AFN'))}${r && r.settlement === 'forward' ? ' · <span class="badge warn">فردایی</span>' : ''}</div></td>
-          <td data-l="قیمت خرید">${r && r.buy != null ? `<b class="num price" style="color:var(--buy)">${fmt(r.buy)}</b>` : '<span class="muted small">بدون نرخ معتبر</span>'}</td>
-          <td data-l="قیمت فروش">${r && r.sell != null ? `<b class="num price" style="color:var(--sell)">${fmt(r.sell)}</b>` : '<span class="muted small">بدون نرخ معتبر</span>'}</td>
+          <td data-l="قیمت خرید" class="${flashCls(r, 'buy')}">${r && r.buy != null ? `<b class="num price" style="color:var(--buy)">${fmt(r.buy)}</b>` : '<span class="muted small">بدون نرخ معتبر</span>'}</td>
+          <td data-l="قیمت فروش" class="${flashCls(r, 'sell')}">${r && r.sell != null ? `<b class="num price" style="color:var(--sell)">${fmt(r.sell)}</b>` : '<span class="muted small">بدون نرخ معتبر</span>'}</td>
           <td data-l="تغییرات"><div class="delta-stack">${r ? deltaCell('خرید', delta(r.buy, r.prevBuy)) + deltaCell('فروش', delta(r.sell, r.prevSell)) : '<span class="muted small">—</span>'}</div></td>
-          <td data-l="آخرین به‌روزرسانی">${r ? `${rateTime(r)}<div style="margin-top:3px">${sourceBadge(r)}</div>` : '<span class="muted small">منتشر نشده</span>'}</td></tr>`).join('') || `<tr><td colspan="6">${emptyBox('نرخی مطابق جستجو یافت نشد.')}</td></tr>`}
+          <td data-l="روند ۷ روز">${r ? sparkSvg((ui.sparks || {})[r.key]) : ''}</td>
+          <td data-l="آخرین به‌روزرسانی">${r ? `${rateTime(r)}<div style="margin-top:3px">${sourceBadge(r)}${isStale(r) ? ' <span class="badge">قدیمی</span>' : ''}</div>` : '<span class="muted small">منتشر نشده</span>'}</td></tr>`).join('') || `<tr><td colspan="7">${emptyBox('نرخی مطابق جستجو یافت نشد.')}</td></tr>`}
       </tbody></table></div>
       <p class="muted small" style="margin:6px 22px 18px">${compact ? '<a href="#rates">جدول کامل نرخ‌ها، شهرها و تاریخچه</a> · ' : ''}نرخ پیشنهادهای اعضا در بخش «بازار» جداگانه نمایش داده می‌شود. نرخی که منتشر نشده باشد نمایش داده نمی‌شود.</p>
     </section>`;
@@ -1081,7 +1091,7 @@
     const rv = ui.ratesView; if (!rv.key) return;
     const want = rv.key + '|' + rv.period;
     rv.loading = want;
-    try { const r = await backend.rateHistory(rv.key, rv.period); if (rv.loading === want) { rv.hist = r.points; rv.histFor = want; } }
+    try { const r = await backend.rateHistory(rv.key, rv.period); if (rv.loading === want) { rv.hist = r.points; rv.stats = r.stats || null; rv.histFor = want; } }
     catch (e) { toast(e.message, true); rv.hist = []; rv.histFor = want; }
     rv.loading = null; render();
   }
@@ -1097,18 +1107,24 @@
       <div class="card card-pad">
         <div class="row"><h2 style="margin:0">تاریخچه ${esc(a.name)} <span class="muted small">(${esc(r.market)} · به ${esc(quoteLabel(r.quote))}${r.settlement === 'forward' ? ' · فردایی' : ''})</span></h2><span class="spacer"></span>
           <span class="small"><span style="color:var(--buy)">━ خرید</span> &nbsp; <span style="color:var(--blue-2)">━ فروش</span></span></div>
-        <div class="seg" style="margin:14px 0">${PERIODS.map(([k, l]) => `<button class="${rv.period === k ? 'on' : ''}" data-act="rates-period" data-v="${k}">${l}</button>`).join('')}</div>
-        <div class="chart">${pts ? lineChart(pts) : '<div class="empty">در حال دریافت…</div>'}</div>
+        ${pts ? statsStrip(rv.stats, r) : ''}
+        <div class="row" style="margin:16px 0 8px;gap:10px">
+          <div class="seg">${PERIODS.map(([k, l]) => `<button class="${rv.period === k ? 'on' : ''}" data-act="rates-period" data-v="${k}">${l}</button>`).join('')}</div>
+          <div class="seg"><button class="${rv.chart === 'line' ? 'on' : ''}" data-act="chart-mode" data-v="line">خطی</button><button class="${rv.chart === 'candle' ? 'on' : ''}" data-act="chart-mode" data-v="candle">شمعی</button></div>
+          ${rv.chart === 'candle' ? `<div class="seg"><button class="${rv.cside === 'sell' ? 'on' : ''}" data-act="chart-side" data-v="sell">فروش</button><button class="${rv.cside === 'buy' ? 'on' : ''}" data-act="chart-side" data-v="buy">خرید</button></div>` : ''}
+          <span class="spacer"></span>${backend.mode === 'server' ? `<a class="btn btn-sm" href="/api/rates/history?${qs({ key: rv.key, period: rv.period, format: 'csv' })}">دریافت CSV</a>` : ''}
+        </div>
+        <div class="chart">${pts ? (rv.chart === 'candle' ? candleChart(pts, { today: 3600e3, yesterday: 3600e3, '7d': 4 * 3600e3, '30d': 864e5, '90d': 864e5 }[rv.period], rv.cside) : lineChartX(pts)) : '<div class="empty">در حال دریافت…</div>'}</div>
       </div>
-      <aside class="card card-pad"><h3>نرخ‌های ثبت‌شده</h3>
-        ${pts ? (rowsDesc.length ? `<div class="hist-list">${rowsDesc.map((p) => `<div class="hist-row"><span class="small muted">${fmtDate(p.at)}</span><span class="num" style="color:var(--buy)">${p.buy != null ? fmt(p.buy) : '—'}</span><span class="num" style="color:var(--sell)">${p.sell != null ? fmt(p.sell) : '—'}</span><span class="badge ${p.kind === 'manual' ? 'warn' : ''}">${KIND_LABEL[p.kind] || ''}</span></div>`).join('')}</div>` : '<p class="muted small">در این بازه نرخی ثبت نشده است.</p>') : ''}
-      </aside>
+      <aside class="stack">${alertsBox(r)}<div class="card card-pad"><h3>نرخ‌های ثبت‌شده</h3>
+        ${pts ? (rowsDesc.length ? `<div class="hist-list" style="max-height:300px">${rowsDesc.map((p) => `<div class="hist-row"><span class="small muted">${fmtDate(p.at)}</span><span class="num" style="color:var(--buy)">${p.buy != null ? fmt(p.buy) : '—'}</span><span class="num" style="color:var(--sell)">${p.sell != null ? fmt(p.sell) : '—'}</span><span class="badge ${p.kind === 'manual' ? 'warn' : ''}">${KIND_LABEL[p.kind] || ''}</span></div>`).join('')}</div>` : '<p class="muted small">در این بازه نرخی ثبت نشده است.</p>') : ''}
+      </div></aside>
     </section>`;
   }
   function pageRates() {
     const rv = ui.ratesView;
     if (!rv.key) { const first = sortRows(rateRows(rv.market), 'popular').find((x) => x.r); if (first) rv.key = first.r.key; }
-    return `${officialBoard()}${rv.key ? historyPanel() : ''}`;
+    return `${marketBar()}${officialBoard()}${rv.key ? historyPanel() : ''}<div class="grid g2" style="margin-top:24px">${converter()}${crossMatrix()}</div>${heatmap()}`;
   }
 
   /* ---------- admin: rates, review queue, messages, sources ---------- */
@@ -1209,6 +1225,220 @@
         </form>`
       : items.length ? `<div class="msg-items">${items.map((it) => `<span class="badge ${it.state === 'applied' || it.state === 'reviewed' ? 'ok' : it.state === 'review' ? 'warn' : ''}">${esc(it.code || '؟')} · ${esc(it.market)}${it.settlement === 'forward' ? ' · فردایی' : ''} · خرید ${it.buy != null ? fmt(it.buy) : '—'} · فروش ${it.sell != null ? fmt(it.sell) : '—'} · ${ITEM_STATE[it.state] || ''}</span>`).join('')}</div>` : ''}
     </div>`;
+  }
+
+  /* =========================================================
+     Professional market tools (rates page)
+     ========================================================= */
+  const watch = { get() { try { return JSON.parse(store.get('sarai-watch') || '[]'); } catch { return []; } }, toggle(k) { const w = watch.get(); const i = w.indexOf(k); i >= 0 ? w.splice(i, 1) : w.push(k); store.set('sarai-watch', JSON.stringify(w)); } };
+  const STALE_MS = 6 * 3600e3;
+  const isStale = (r) => r && r.updatedAt && Date.now() - r.updatedAt > STALE_MS;
+  const lastSeen = new Map(); // key -> {buy, sell} for tick flashes
+  function flashCls(r, side) {
+    if (!r) return '';
+    const prev = lastSeen.get(r.key);
+    if (!prev || prev[side] == null || r[side] == null || prev[side] === r[side]) return '';
+    return r[side] > prev[side] ? 'flash-up' : 'flash-down';
+  }
+  function rememberTicks() { for (const r of liveRates()) lastSeen.set(r.key, { buy: r.buy, sell: r.sell }); }
+  function sparkSvg(arr) {
+    if (!arr || arr.length < 2) return '<span class="muted small">—</span>';
+    const w = 96, h = 30, lo = Math.min(...arr), hi = Math.max(...arr), rg = hi - lo || 1;
+    const d = arr.map((v, i) => `${i ? 'L' : 'M'}${((i / (arr.length - 1)) * w).toFixed(1)},${(h - 3 - ((v - lo) / rg) * (h - 6)).toFixed(1)}`).join('');
+    const up = arr[arr.length - 1] >= arr[0], c = up ? '#2fd389' : '#ff6b7a';
+    return `<svg class="spark-mini" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" style="direction:ltr"><path d="${d}" fill="none" stroke="${c}" stroke-width="1.8" style="filter:drop-shadow(0 0 3px ${c}88)"/></svg>`;
+  }
+  async function loadSparks() {
+    if (ui.sparksAt && Date.now() - ui.sparksAt < 60e3) return;
+    ui.sparksAt = Date.now();
+    try { ui.sparks = await backend.sparks(); if (route() === 'rates' || route() === 'home') render(); } catch { /* optional */ }
+  }
+
+  // World market clocks (updated every second without re-rendering the page).
+  const CLOCKS = [['کابل', 'Asia/Kabul'], ['تهران', 'Asia/Tehran'], ['دبی', 'Asia/Dubai'], ['استانبول', 'Europe/Istanbul'], ['لندن', 'Europe/London'], ['نیویورک', 'America/New_York']];
+  const clockFmt = {};
+  const clockText = (tz) => { clockFmt[tz] = clockFmt[tz] || new Intl.DateTimeFormat('fa-AF', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: tz }); return clockFmt[tz].format(new Date()); };
+  function marketBar() {
+    const lr = liveRates(); const last = lr.reduce((m, r) => Math.max(m, r.updatedAt || 0), 0);
+    const fresh = last && Date.now() - last < STALE_MS;
+    return `<div class="market-bar card">
+      <div class="mb-status"><span class="pulse-dot ${fresh ? '' : 'off'}"></span><div><b>${fresh ? 'دریافت نرخ فعال' : 'نرخ تازه‌ای دریافت نشده'}</b><div class="muted small">آخرین نرخ: ${last ? ago(last) : '—'} · ${lr.length} نرخ فعال</div></div></div>
+      <div class="clocks">${CLOCKS.map(([n, tz]) => `<div class="clock"><span class="muted small">${n}</span><b class="num" data-clock="${tz}">${clockText(tz)}</b></div>`).join('')}</div>
+    </div>`;
+  }
+  setInterval(() => document.querySelectorAll('[data-clock]').forEach((el) => { el.textContent = clockText(el.dataset.clock); }), 1000);
+
+  // Heatmap of today's change for Kabul rates in afghani.
+  function heatmap() {
+    const rows = liveRates().filter((r) => r.market === 'کابل' && r.quote === 'AFN' && r.settlement === 'cash');
+    if (!rows.length) return '';
+    return `<section class="card card-pad" style="margin-top:22px"><div class="row"><h2 style="margin:0">نقشه حرارتی تغییرات</h2><span class="muted small">بازار کابل · نسبت به نرخ قبلی</span></div>
+      <div class="heat">${rows.map((r) => {
+        const dl = delta(r.sell ?? r.buy, r.sell != null ? r.prevSell : r.prevBuy); const p = dl ? dl.p : 0;
+        const a = Math.min(1, Math.abs(p) / 1.5), bg = p > 0 ? `rgba(47,211,137,${0.15 + a * 0.55})` : p < 0 ? `rgba(255,107,122,${0.15 + a * 0.55})` : 'rgba(127,127,127,.15)';
+        return `<button class="heat-tile" style="background:${bg}" data-act="rate-open" data-key="${esc(r.key)}"><b class="ltr">${esc(r.code)}</b><span class="small">${esc(assetByCode(r.code).name)}</span><span class="num">${p > 0 ? '+' : ''}${p.toFixed(2)}%</span></button>`;
+      }).join('')}</div></section>`;
+  }
+
+  // Currency converter using the Kabul afghani rates (direction-aware: buy vs sell).
+  function converter() {
+    const lr = liveRates().filter((r) => r.market === 'کابل' && r.quote === 'AFN' && r.settlement === 'cash');
+    if (!lr.length) return '';
+    const C = ui.conv;
+    const codes = ['AFN', ...lr.map((r) => r.code)];
+    if (!codes.includes(C.from)) C.from = lr[0].code;
+    if (!codes.includes(C.to)) C.to = 'AFN';
+    const name = (c) => (c === 'AFN' ? 'افغانی' : assetByCode(c).name);
+    const rate = (c) => lr.find((r) => r.code === c);
+    const amt = Number(String(C.amount).replace(/,/g, '')) || 0;
+    let out = null, how = '', missing = false;
+    if (C.from === C.to) { out = amt; how = '—'; }
+    else {
+      // Selling foreign currency to the exchanger uses its BUY price; buying from it uses its SELL price.
+      let afn = amt;
+      if (C.from !== 'AFN') { const r = rate(C.from); if (!r || r.buy == null) missing = true; else { afn = amt * r.buy; how += `${name(C.from)} × خرید ${fmt(r.buy)}`; } }
+      if (!missing && C.to !== 'AFN') { const r = rate(C.to); if (!r || r.sell == null) missing = true; else { out = afn / r.sell; how += `${how ? ' ← ' : ''}÷ فروش ${name(C.to)} ${fmt(r.sell)}`; } }
+      else if (!missing) out = afn;
+    }
+    const sel = (field, v) => `<select class="input" data-conv="${field}">${codes.map((c) => `<option value="${c}" ${c === v ? 'selected' : ''}>${esc(name(c))} (${c})</option>`).join('')}</select>`;
+    return `<section class="card card-pad aura conv"><h2>مبدل ارز</h2>
+      <div class="conv-grid">
+        <label class="field"><span>مبلغ</span><input class="input num conv-amt" data-conv="amount" inputmode="decimal" value="${esc(C.amount)}"></label>
+        <label class="field"><span>از</span>${sel('from', C.from)}</label>
+        <button class="glass-orb conv-swap" data-act="conv-swap" aria-label="جابه‌جایی">${svg('<path d="M7 4v16M7 4l-3 3M7 4l3 3M17 20V4M17 20l-3-3M17 20l3-3"/>', 22)}</button>
+        <label class="field"><span>به</span>${sel('to', C.to)}</label>
+      </div>
+      <div class="conv-out">${missing ? '<span class="muted">نرخ معتبر برای این تبدیل موجود نیست.</span>' : `<b class="num">${fmt(out, out > 100 ? 2 : 6)}</b> <span>${esc(name(C.to))}</span>`}</div>
+      <p class="muted small" style="margin:6px 0 0">${missing ? '' : esc(how) + ' · '}بر اساس نرخ نقدی بازار کابل. فروش ارز به صراف با نرخ خرید و خرید ارز از صراف با نرخ فروش محاسبه می‌شود.</p>
+    </section>`;
+  }
+
+  // Cross rates between currencies (mid prices via afghani).
+  function crossMatrix() {
+    const lr = liveRates().filter((r) => r.market === 'کابل' && r.quote === 'AFN' && r.settlement === 'cash' && r.buy != null && r.sell != null);
+    if (lr.length < 2) return '';
+    const list = lr.slice(0, 7), mid = (r) => (r.buy + r.sell) / 2;
+    return `<section class="card card-pad"><h2>نرخ‌های متقاطع</h2><p class="muted small" style="margin-top:-6px">ارزش یک واحد ارز ستون راست بر حسب ارز ستون بالا (میانگین خرید و فروش)</p>
+      <div class="table-wrap"><table class="cross"><thead><tr><th></th><th class="ltr">AFN</th>${list.map((c) => `<th class="ltr">${esc(c.code)}</th>`).join('')}</tr></thead><tbody>
+      ${list.map((r) => `<tr><th class="ltr">${esc(r.code)}</th><td class="num">${fmt(mid(r), 4)}</td>${list.map((c) => `<td class="num ${c.code === r.code ? 'muted' : ''}">${c.code === r.code ? '1' : fmt(mid(r) / mid(c), mid(r) / mid(c) > 10 ? 2 : 5)}</td>`).join('')}</tr>`).join('')}
+      </tbody></table></div></section>`;
+  }
+
+  // Candles from history points: open/high/low/close per time bucket for one side.
+  function toCandles(points, tf, side) {
+    const out = []; let cur = null, last = null;
+    for (const p of points) {
+      const v = p[side] != null ? p[side] : null;
+      if (v == null) continue;
+      const b = Math.floor(p.at / tf) * tf;
+      if (!cur || cur.t !== b) { cur = { t: b, o: last ?? v, h: Math.max(last ?? v, v), l: Math.min(last ?? v, v), c: v }; out.push(cur); }
+      else { cur.h = Math.max(cur.h, v); cur.l = Math.min(cur.l, v); cur.c = v; }
+      last = v;
+    }
+    return out;
+  }
+  let chartModel = null; // for the crosshair
+  function candleChart(points, tf, side, { w = 640, h = 240 } = {}) {
+    const cs = toCandles(points, tf, side);
+    if (cs.length < 2) return '<p class="muted small">برای نمودار شمعی در این بازه داده کافی وجود ندارد.</p>';
+    let lo = Math.min(...cs.map((c) => c.l)), hi = Math.max(...cs.map((c) => c.h));
+    if (lo === hi) { lo *= 0.999; hi *= 1.001; }
+    const pad = 24, padL = 8, iw = w - padL - 70;
+    const X = (i) => padL + ((i + 0.5) / cs.length) * iw, bw = Math.max(2, Math.min(16, (iw / cs.length) * 0.6));
+    const Y = (v) => pad + (1 - (v - lo) / (hi - lo)) * (h - pad * 2);
+    chartModel = { kind: 'candle', w, padL, iw, n: cs.length, items: cs.map((c, i) => ({ x: X(i), at: c.t, o: c.o, h: c.h, l: c.l, c: c.c })) };
+    const fmtT = (t) => (tf < 864e5 ? timeFmt : dayFmt).format(new Date(t));
+    return `<svg viewBox="0 0 ${w} ${h}" class="xchart" style="direction:ltr">
+      ${[lo, (lo + hi) / 2, hi].map((v) => `<line x1="${padL}" x2="${w - 70}" y1="${Y(v)}" y2="${Y(v)}" stroke="rgba(127,127,127,.18)" stroke-dasharray="3 4"/><text x="${w - 64}" y="${Y(v) + 4}" font-size="11" fill="#7a879c">${fmt(v, 4)}</text>`).join('')}
+      ${cs.map((c, i) => { const up = c.c >= c.o, col = up ? '#2fd389' : '#ff6b7a', y1 = Y(Math.max(c.o, c.c)), y2 = Y(Math.min(c.o, c.c));
+        return `<g class="candle" style="animation-delay:${Math.min(i * 18, 600)}ms"><line x1="${X(i)}" x2="${X(i)}" y1="${Y(c.h)}" y2="${Y(c.l)}" stroke="${col}" stroke-width="1.3"/><rect x="${X(i) - bw / 2}" y="${y1}" width="${bw}" height="${Math.max(1.5, y2 - y1)}" rx="1.5" fill="${col}" fill-opacity="${up ? 0.85 : 0.9}"/></g>`; }).join('')}
+      ${[0, Math.floor(cs.length / 2), cs.length - 1].map((i) => `<text x="${X(i)}" y="${h - 4}" font-size="11" fill="#7a879c" text-anchor="middle">${fmtT(cs[i].t)}</text>`).join('')}
+      <line class="xh" x1="0" x2="0" y1="${pad}" y2="${h - pad}" stroke="rgba(127,127,127,.5)" stroke-dasharray="3 3" style="display:none"/>
+    </svg><div class="xtip" style="display:none"></div>`;
+  }
+  function lineChartX(points) {
+    const html = lineChart(points);
+    const pts = points.filter((p) => p.buy != null || p.sell != null);
+    if (pts.length >= 2) {
+      const t0 = pts[0].at, t1 = pts[pts.length - 1].at, w = 640, padL = 8, iw = w - padL - 70;
+      let lb = null, ls = null;
+      chartModel = { kind: 'line', w, padL, iw, items: pts.map((p) => { if (p.buy != null) lb = p.buy; if (p.sell != null) ls = p.sell; return { x: padL + ((p.at - t0) / (t1 - t0 || 1)) * iw, at: p.at, buy: lb, sell: ls }; }) };
+      return html.replace('<svg ', '<svg class="xchart" ') + '<div class="xtip" style="display:none"></div>';
+    }
+    return html;
+  }
+  function attachCrosshair() {
+    const svgEl = document.querySelector('.chart svg.xchart'); const tip = document.querySelector('.chart .xtip');
+    if (!svgEl || !tip || !chartModel) return;
+    const line = svgEl.querySelector('.xh') || (() => { const l = document.createElementNS('http://www.w3.org/2000/svg', 'line'); l.setAttribute('class', 'xh'); l.setAttribute('y1', '20'); l.setAttribute('y2', '200'); l.setAttribute('stroke', 'rgba(127,127,127,.5)'); l.setAttribute('stroke-dasharray', '3 3'); svgEl.appendChild(l); return l; })();
+    const move = (ev) => {
+      const rect = svgEl.getBoundingClientRect(); const cx = ((ev.touches ? ev.touches[0].clientX : ev.clientX) - rect.left) / rect.width * chartModel.w;
+      let best = chartModel.items[0]; for (const it of chartModel.items) if (Math.abs(it.x - cx) < Math.abs(best.x - cx)) best = it;
+      line.setAttribute('x1', best.x); line.setAttribute('x2', best.x); line.style.display = '';
+      tip.style.display = ''; tip.style.left = `${(best.x / chartModel.w) * 100}%`;
+      tip.innerHTML = `<div class="muted">${fmtDate(best.at)}</div>` + (chartModel.kind === 'candle'
+        ? `<div class="num">باز ${fmt(best.o)} · بالا ${fmt(best.h)}</div><div class="num">پایین ${fmt(best.l)} · بسته ${fmt(best.c)}</div>`
+        : `<div class="num" style="color:var(--buy)">خرید ${best.buy != null ? fmt(best.buy) : '—'}</div><div class="num" style="color:var(--sell)">فروش ${best.sell != null ? fmt(best.sell) : '—'}</div>`);
+    };
+    const leave = () => { line.style.display = 'none'; tip.style.display = 'none'; };
+    svgEl.addEventListener('mousemove', move); svgEl.addEventListener('touchmove', move, { passive: true });
+    svgEl.addEventListener('mouseleave', leave); svgEl.addEventListener('touchend', leave);
+  }
+
+  // Session stats and range bars for the selected rate.
+  function rangeBar(label, lo, hi, cur) {
+    if (lo == null || hi == null || cur == null) return '';
+    const p = hi > lo ? ((cur - lo) / (hi - lo)) * 100 : 50;
+    return `<div class="range"><div class="row small" style="justify-content:space-between"><span class="muted">${label}</span></div>
+      <div class="range-track"><i style="left:calc(${p.toFixed(1)}% - 7px)"></i></div>
+      <div class="row small num" style="justify-content:space-between"><span>${fmt(lo)}</span><span>${fmt(hi)}</span></div></div>`;
+  }
+  function statsStrip(st, r) {
+    if (!st) return '';
+    const side = r.sell != null ? 'sell' : 'buy', s = st[side], lbl = side === 'sell' ? 'فروش' : 'خرید';
+    const ch = s.last != null && s.prevClose != null ? delta(s.last, s.prevClose) : null;
+    const spread = r.buy != null && r.sell != null ? { a: r.sell - r.buy, p: ((r.sell - r.buy) / r.buy) * 100 } : null;
+    const cell = (k, v, cls = '') => `<div class="stat"><span class="muted small">${k}</span><b class="num ${cls}">${v}</b></div>`;
+    return `<div class="stats-strip">
+      ${cell('باز (' + lbl + ')', s.open != null ? fmt(s.open) : '—')}
+      ${cell('بالاترین امروز', s.high != null ? fmt(s.high) : '—', 'up')}
+      ${cell('پایین‌ترین امروز', s.low != null ? fmt(s.low) : '—', 'down')}
+      ${cell('بسته دیروز', s.prevClose != null ? fmt(s.prevClose) : '—')}
+      ${cell('تغییر روزانه', ch ? `${ch.d > 0 ? '+' : ''}${fmt(ch.d)} (${ch.p.toFixed(2)}%)` : '—', ch ? (ch.d > 0 ? 'up' : ch.d < 0 ? 'down' : '') : '')}
+      ${cell('اختلاف خرید و فروش', spread ? `${fmt(spread.a)} (${spread.p.toFixed(2)}%)` : '—')}
+      ${cell('تعداد به‌روزرسانی امروز', st.updatesToday)}
+    </div>
+    <div class="grid g2" style="gap:16px;margin-top:14px">${rangeBar('دامنه امروز (' + lbl + ')', s.low, s.high, r[side])}${rangeBar('دامنه ۳۰ روز (' + lbl + ')', s.low30, s.high30, r[side])}</div>`;
+  }
+  function alertsBox(r) {
+    if (!me()) return `<div class="card card-pad"><h3>هشدار قیمت</h3><p class="muted small" style="margin:0">برای تعریف هشدار قیمت <a href="#login">وارد شوید</a>.</p></div>`;
+    const mine = (view.alerts || []).filter((a) => a.key === r.key);
+    return `<div class="card card-pad"><h3>هشدار قیمت</h3>
+      <form data-form="alert" data-key="${esc(r.key)}" class="stack">
+        <div class="grid g2"><select class="input" name="side"><option value="sell">قیمت فروش</option><option value="buy">قیمت خرید</option></select>
+        <select class="input" name="op"><option value="gte">بیشتر یا مساوی</option><option value="lte">کمتر یا مساوی</option></select></div>
+        <div class="row"><input class="input num" name="value" inputmode="decimal" placeholder="${r.sell != null ? fmt(r.sell) : ''}" required style="flex:1"><button class="btn btn-primary btn-sm">ثبت هشدار</button></div>
+      </form>
+      ${mine.length ? `<div style="margin-top:10px">${mine.map((a) => `<div class="hist-row" style="grid-template-columns:1fr auto auto"><span class="small">${a.side === 'buy' ? 'خرید' : 'فروش'} ${a.op === 'gte' ? '≥' : '≤'} <b class="num">${fmt(a.value)}</b></span>${a.active ? '<span class="badge blue">فعال</span>' : `<span class="badge ok">اجرا شد ${a.firedAt ? ago(a.firedAt) : ''}</span>`}<button class="btn btn-ghost btn-sm" data-act="alert-del" data-id="${a.id}">حذف</button></div>`).join('')}</div>` : ''}
+      <p class="muted small" style="margin:8px 0 0">هنگام رسیدن قیمت به شرط، اعلان دریافت می‌کنید.</p></div>`;
+  }
+
+  // Order-book depth for one asset from members' active offers.
+  function depthPanel(assetId) {
+    const os = view.orders.filter((o) => o.status === 'active' && o.assetId === assetId);
+    if (!os.length) return '';
+    const a = asset(assetId);
+    const lvl = (side, dir) => { const m = new Map(); for (const o of os.filter((x) => x.side === side)) m.set(o.price, (m.get(o.price) || 0) + o.remaining); return [...m.entries()].sort((x, y) => dir * (x[0] - y[0])).slice(0, 8); };
+    const bids = lvl('buy', -1), asks = lvl('sell', 1);
+    let cb = 0, ca = 0; const cumB = bids.map(([p, q]) => [p, q, (cb += q)]), cumA = asks.map(([p, q]) => [p, q, (ca += q)]);
+    const max = Math.max(cb, ca, 1);
+    const spread = bids.length && asks.length ? asks[0][0] - bids[0][0] : null;
+    const row = (cls, [p, q, c]) => `<div class="depth-row ${cls}"><i style="width:${((c / max) * 100).toFixed(1)}%"></i><span class="num">${fmt(p)}</span><span class="num">${fmt(q)}</span><span class="num muted">${fmt(c)}</span></div>`;
+    return `<section class="card card-pad" style="margin-bottom:22px"><div class="row"><h2 style="margin:0">عمق بازار ${esc(a.name)}</h2><span class="spacer"></span>${spread != null ? `<span class="badge">اختلاف: <span class="num">${fmt(spread)}</span></span>` : ''}</div>
+      <div class="grid g2" style="margin-top:12px;gap:16px">
+        <div><div class="depth-head"><span>خرید (تقاضا)</span><span>مقدار</span><span>تجمعی</span></div>${cumB.map((x) => row('bid', x)).join('') || '<p class="muted small">پیشنهاد خریدی نیست.</p>'}</div>
+        <div><div class="depth-head"><span>فروش (عرضه)</span><span>مقدار</span><span>تجمعی</span></div>${cumA.map((x) => row('ask', x)).join('') || '<p class="muted small">پیشنهاد فروشی نیست.</p>'}</div>
+      </div></section>`;
   }
 
   /* ---------- static pages ---------- */
@@ -1566,6 +1796,11 @@
         case 'asset-delete': sensitive('admin.asset.delete', { assetId: nid }, 'ارز حذف شد. تاریخچه آن حفظ می‌شود.', 'حذف ارز از فهرست. نرخ‌های ثبت‌شده و تاریخچه حذف نمی‌شوند.'); break;
         case 'rates-market': ui.ratesView = { ...ui.ratesView, market: t.dataset.v, key: null }; render(); break;
         case 'rates-period': ui.ratesView.period = t.dataset.v; render(); break;
+        case 'chart-mode': ui.ratesView.chart = t.dataset.v; render(); break;
+        case 'chart-side': ui.ratesView.cside = t.dataset.v; render(); break;
+        case 'watch': e.stopPropagation(); watch.toggle(t.dataset.key); render(); break;
+        case 'conv-swap': { const c = ui.conv; [c.from, c.to] = [c.to, c.from]; render(); break; }
+        case 'alert-del': await act('alert.delete', { id: nid }, 'هشدار حذف شد.'); break;
         case 'asset-toggle': sensitive('admin.asset.toggle', { assetId: nid }, 'وضعیت دارایی تغییر کرد.'); break;
         case 'asset-edit': {
           const as = view.assets.find((x) => x.id === nid); const f = document.querySelector('[data-form="asset"]');
@@ -1608,6 +1843,7 @@
           await refresh(); closeModal(); location.hash = `#deal-${r.dealId}`; render(); toast('درخواست ارسال شد.'); break;
         }
         case 'reject': await act('deal.reject', { dealId: id, reason: d.reason }, 'درخواست رد شد.'); break;
+        case 'alert': await act('alert.create', { key: f.dataset.key, side: d.side, op: d.op, value: d.value }, 'هشدار قیمت ثبت شد.'); break;
         case 'complete': await act('deal.complete', { dealId: id }, 'تکمیل معامله از طرف شما ثبت شد.'); break;
         case 'cancel-deal': await act('deal.cancel', { dealId: id, reason: d.reason }, 'معامله لغو شد.'); break;
         case 'close-order': await act('order.cancel', { orderId: id }, 'سفارش بسته شد.'); break;
@@ -1654,6 +1890,12 @@
       return;
     }
     if (t.dataset.rates === 'sort') { ui.ratesView.sort = t.value; render(); return; }
+    if (t.dataset.conv) {
+      ui.conv[t.dataset.conv] = t.value;
+      if (t.dataset.conv === 'amount') { const pos = t.selectionStart; render(); const ni = document.querySelector('[data-conv="amount"]'); if (ni) { ni.focus(); try { ni.setSelectionRange(pos, pos); } catch { /* ignore */ } } }
+      else render();
+      return;
+    }
     if (t.dataset.filter) {
       ui.filters[t.dataset.filter] = t.value;
       if (t.tagName === 'SELECT') render(); else renderMarketTable();
