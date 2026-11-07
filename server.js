@@ -17,6 +17,8 @@ const Engine = require('./shared/engine.js');
 const PORT = Number(process.env.PORT || 3000);
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'data', 'sarai.db');
 const SESSION_DAYS = 30;
+// Unlisted address of the admin panel. Change it with the ADMIN_PATH environment variable.
+const ADMIN_PATH = '/' + String(process.env.ADMIN_PATH || 'sh-panel-7319').replace(/^\/+|\/+$/g, '');
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 
 /* ---------- storage ---------- */
@@ -194,6 +196,13 @@ async function api(req, res, url) {
 
 function serveStatic(req, res, url) {
   let rel = decodeURIComponent(url.pathname);
+  if (rel === ADMIN_PATH || rel === ADMIN_PATH + '/') {
+    return fs.readFile(path.join(__dirname, 'public', 'index.html'), 'utf8', (err, html) => {
+      if (err) { res.writeHead(500); return res.end(); }
+      res.writeHead(200, { 'Content-Type': MIME['.html'], 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex, nofollow', ...SECURITY_HEADERS });
+      res.end(html.replace('<html lang="fa" dir="rtl">', '<html lang="fa" dir="rtl" data-mode="admin">').replace('<head>', '<head>\n  <base href="/">').replace('<link rel="manifest" href="manifest.webmanifest">', ''));
+    });
+  }
   if (rel === '/') rel = '/index.html';
   const baseDir = rel.startsWith('/shared/') ? __dirname : path.join(__dirname, 'public');
   const file = path.normalize(path.join(baseDir, rel));

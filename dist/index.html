@@ -1121,6 +1121,8 @@ textarea.input { min-height: 90px; resize: vertical; }
      State + helpers
      ========================================================= */
   let backend = null, view = null, pendingRender = false;
+  // The admin panel is a separate, unlisted entry point (server: ADMIN_PATH; demo: #sarai-panel).
+  let ADMIN_MODE = false;
   const ui = {
     filters: { asset: '', side: '', min: '', max: '', minAmount: '', q: '', sort: 'new' },
     notifOpen: false, menuOpen: false, rateAsset: null, side: 'sell', orderTab: 'all', adminUserFilter: 'all',
@@ -1231,8 +1233,25 @@ textarea.input { min-height: 90px; resize: vertical; }
   /* =========================================================
      Layout
      ========================================================= */
-  const route = () => (location.hash || '#home').slice(1) || 'home';
+  const route = () => {
+    const r = (location.hash || '').slice(1);
+    if (ADMIN_MODE) return !r || r === 'home' || r === 'sarai-panel' ? 'admin' : r;
+    return r || 'home';
+  };
+  function adminHeader() {
+    const m = me();
+    const unread = m ? view.notifications.filter((n) => !n.read).length : 0;
+    return `<header class="topbar"><div class="topbar-inner">
+      <a class="brand" href="#admin"><span class="brand-mark">${ICON.nAdmin.replace('<svg ', '<svg width="22" height="22" style="color:var(--blue-2)" ')}</span><span><b>پنل مدیریت</b><small>سرای شهزاده — دسترسی محدود</small></span></a>
+      <div class="top-actions">
+        ${isAdmin() ? `<button class="bell" data-act="toggle-notifs" aria-label="اعلان‌ها">${ICON.bell}${unread ? `<span class="dot">${unread}</span>` : ''}</button>` : ''}
+        <button class="bell" data-act="theme" aria-label="تغییر تم">${document.documentElement.dataset.theme === 'light' ? ICON.moon : ICON.sun}</button>
+        ${m ? `<button class="btn btn-light btn-sm" data-act="logout">خروج</button>` : ''}
+      </div></div></header>
+    ${ui.notifOpen && isAdmin() ? notifDrawer() : ''}`;
+  }
   function header() {
+    if (ADMIN_MODE) return adminHeader();
     const r = route();
     const m = me();
     const unread = m ? view.notifications.filter((n) => !n.read).length : 0;
@@ -1248,7 +1267,7 @@ textarea.input { min-height: 90px; resize: vertical; }
         <a class="brand" href="#home"><span class="brand-mark">${ICON.logo}</span><span><b>سرای شهزاده</b><small>بازار دیجیتال معاملات کابل</small></span></a>
         <nav class="nav ${ui.menuOpen ? 'open' : ''}">
           ${link('home', 'صفحه اصلی')}${link('market', 'بازار معاملات')}${link('rates', 'نرخ ارزها')}${link('new', 'ثبت سفارش')}
-          ${m ? link('dashboard', 'داشبورد') : ''}${isAdmin() ? link('admin', 'مدیریت') : ''}${m ? `<a href="#profile" class="mobile-only">پروفایل (${esc(m.company || m.name)})</a>` : ''}
+          ${m ? link('dashboard', 'داشبورد') : ''}${m ? `<a href="#profile" class="mobile-only">پروفایل (${esc(m.company || m.name)})</a>` : ''}
         </nav>
         <div class="top-actions">
           ${m ? `<button class="bell" data-act="toggle-notifs" aria-label="اعلان‌ها">${ICON.bell}${unread ? `<span class="dot">${unread}</span>` : ''}</button>
@@ -1264,7 +1283,7 @@ textarea.input { min-height: 90px; resize: vertical; }
     ${ui.notifOpen && m ? notifDrawer() : ''}`;
   }
   function demoBar() {
-    const users = LocalBackend.state.users;
+    const users = LocalBackend.state.users.filter((u) => u.role !== 'admin');
     return `<div class="demo-bar">نسخه نمایشی — اطلاعات فقط در همین مرورگر ذخیره می‌شود. ورود سریع به‌عنوان:
       <select data-change="demo-switch"><option value="">— مهمان —</option>${users.map((u) => `<option value="${u.id}" ${view.me && view.me.id === u.id ? 'selected' : ''}>${esc(u.company)}${u.role === 'admin' ? ' (مدیر)' : u.status !== 'approved' ? ' (تأییدنشده)' : ''}</option>`).join('')}</select>
       <button data-act="demo-reset">بازنشانی اطلاعات نمونه</button></div>`;
@@ -1285,7 +1304,7 @@ textarea.input { min-height: 90px; resize: vertical; }
     try { page = pageFor(r); } catch (e) { console.error(e); page = `<div class="card card-pad">${esc(e.message)}</div>`; }
     const scrollY = window.scrollY;
     const entering = render.lastRoute !== r;
-    $app.innerHTML = `${header()}<main class="${entering ? 'enter' : ''}">${page}</main>${bottomNav(r)}
+    $app.innerHTML = `${header()}<main class="${entering ? 'enter' : ''}">${page}</main>${ADMIN_MODE ? '' : bottomNav(r)}
       <footer class="footer">سرای شهزاده کابل — بستر معرفی پیشنهاد و ارتباط خریدار و فروشنده. انتقال پول و تسویه در این سایت انجام نمی‌شود.</footer>`;
     if (render.lastRoute === r) window.scrollTo(0, scrollY); else window.scrollTo(0, 0);
     render.lastRoute = r;
@@ -1304,7 +1323,7 @@ textarea.input { min-height: 90px; resize: vertical; }
   }
   function bottomNav(r) {
     const items = [['home', 'خانه', ICON.nHome], ['market', 'بازار', ICON.nMarket], ['new', 'ثبت', ICON.nNew],
-      isAdmin() ? ['admin', 'مدیریت', ICON.nAdmin] : ['rates', 'نرخ‌ها', ICON.nRates],
+      ['rates', 'نرخ‌ها', ICON.nRates],
       me() ? ['dashboard', 'داشبورد', ICON.nDash] : ['login', 'ورود', ICON.nDash]];
     return `<nav class="bottom-nav">${items.map(([h, l, ic]) => `<a href="#${h}" class="${r === h || r.startsWith(h + '-') ? 'active' : ''}">${ic}<span>${l}</span></a>`).join('')}</nav>`;
   }
@@ -1328,6 +1347,15 @@ textarea.input { min-height: 90px; resize: vertical; }
   }
   function pageFor(r) {
     let m;
+    if (ADMIN_MODE) {
+      if (!isAdmin()) return pageAdminLogin();
+      if ((m = /^admin(?:-(\w+))?$/.exec(r))) return pageAdmin(m[1] || 'overview');
+      if ((m = /^order-(\d+)$/.exec(r))) return adminBack() + pageOrder(Number(m[1]));
+      if ((m = /^deal-(\d+)$/.exec(r))) return adminBack() + pageDeal(Number(m[1]));
+      if ((m = /^user-(\d+)$/.exec(r))) return adminBack() + pageUser(Number(m[1]));
+      if (r === 'profile') return adminBack() + pageProfile();
+      return pageAdmin('overview');
+    }
     if (r === 'home') return pageHome();
     if (r === 'market') return pageMarket();
     if (r === 'rates') return pageRates();
@@ -1339,7 +1367,6 @@ textarea.input { min-height: 90px; resize: vertical; }
     if ((m = /^order-(\d+)$/.exec(r))) return needApproved() || pageOrder(Number(m[1]));
     if ((m = /^deal-(\d+)$/.exec(r))) return needUser() || pageDeal(Number(m[1]));
     if ((m = /^user-(\d+)$/.exec(r))) return needApproved() || pageUser(Number(m[1]));
-    if ((m = /^admin(?:-(\w+))?$/.exec(r))) return (isAdmin() ? pageAdmin(m[1] || 'overview') : gate('این بخش فقط برای مدیر سیستم است.'));
     return gate('صفحه پیدا نشد.');
   }
   const gate = (msg, extra = '') => `<div class="auth-wrap card card-pad" style="text-align:center"><p>${msg}</p>${extra}</div>`;
@@ -1429,7 +1456,6 @@ textarea.input { min-height: 90px; resize: vertical; }
       })()}
     </section>
 
-    ${isAdmin() ? adminBanner() : ''}
     <div class="page-head" style="margin-top:28px"><div><h1>آخرین پیشنهادهای بازار</h1><p>پیشنهادهای فعال اعضای تأییدشده</p></div><a class="btn" href="#market">مشاهده همه ←</a></div>
     <div class="card">${ordersTable(active.slice(0, 6), { empty: 'هنوز سفارشی ثبت نشده است' })}</div>
 
@@ -1780,8 +1806,7 @@ textarea.input { min-height: 90px; resize: vertical; }
         ${view.notifications.length ? view.notifications.map((n) => `<div class="notif ${n.read ? '' : 'unread'}" data-act="open-notif" data-id="${n.id}" data-link="${esc(n.link)}">${esc(n.text)}<time>${fmtDate(n.at)}</time></div>`).join('') : emptyBox('اعلانی ندارید')}</div>`;
     }
     return `<div class="page-head"><div><h1>داشبورد ${esc(m.company)}</h1><p>${userBadge(m.status)} · ${E.ACTIVITIES[m.activity] || ''}</p></div>${approved() ? '<a class="btn btn-primary" href="#new">+ سفارش جدید</a>' : ''}</div>
-      ${isAdmin() ? adminBanner() : ''}
-      ${m.status !== 'approved' ? '<div class="notice warn" style="margin-bottom:16px">حساب شما منتظر تأیید مدیر سیستم است. تا آن زمان امکان ثبت سفارش و ارسال درخواست وجود ندارد.</div>' : ''}
+        ${m.status !== 'approved' ? '<div class="notice warn" style="margin-bottom:16px">حساب شما منتظر تأیید مدیر سیستم است. تا آن زمان امکان ثبت سفارش و ارسال درخواست وجود ندارد.</div>' : ''}
       ${tabBar}${body}`;
   }
   const sortDeals = (ds) => ds.slice().sort((a, b) => (a.status === 'pending' ? 0 : 1) - (b.status === 'pending' ? 0 : 1) || b.updatedAt - a.updatedAt);
@@ -1906,7 +1931,20 @@ textarea.input { min-height: 90px; resize: vertical; }
       <div class="form-error hidden"></div>
       <button class="btn btn-primary btn-lg">ورود</button>
       <p class="small muted" style="margin:0;text-align:center">حساب ندارید؟ <a href="#register">ثبت‌نام کنید</a></p>
-      <div class="notice small">حساب‌های نمونه: مدیر <span class="num">0700000000</span> رمز <span class="num">admin123</span> — صراف <span class="num">0700000001</span> رمز <span class="num">123456</span> (اعضای دیگر: <span class="num">0700000002</span> تا <span class="num">0700000005</span>)</div>
+      <div class="notice small">حساب‌های نمونه برای آزمایش: <span class="num">0700000001</span> تا <span class="num">0700000005</span> — رمز همه <span class="num">123456</span></div>
+    </form></div>`;
+  }
+  const adminBack = () => '<a class="btn btn-sm" href="#admin" style="margin-bottom:16px">→ بازگشت به پنل</a>';
+  function pageAdminLogin() {
+    const m = me();
+    return `<div class="auth-wrap"><form class="card card-pad stack glow" data-form="admin-login">
+      <div style="display:flex;justify-content:center"><span class="asset-ico" style="width:64px;height:64px">${ICON.nAdmin.replace('<svg ', '<svg width="28" height="28" ')}</span></div>
+      <h1 style="margin:0;font-size:21px;text-align:center">ورود مدیر</h1>
+      ${m ? `<div class="notice warn small">حساب «${esc(m.company)}» دسترسی مدیریت ندارد.</div>` : ''}
+      <label class="field"><span>شماره تماس</span><input class="input num" name="phone" inputmode="tel" required autocomplete="username"></label>
+      <label class="field"><span>رمز عبور</span><input class="input" type="password" name="password" required autocomplete="current-password"></label>
+      <div class="form-error hidden"></div>
+      <button class="btn btn-primary btn-lg">ورود به پنل</button>
     </form></div>`;
   }
   function pageRegister() {
@@ -2046,8 +2084,11 @@ textarea.input { min-height: 90px; resize: vertical; }
       }
       case 'toggle-notifs': ui.notifOpen = !ui.notifOpen; render(); break;
       case 'read-all': await act('notifications.read', {}); break;
-      case 'open-notif': ui.notifOpen = false; await backend.action('notifications.read', { id: nid }).catch(() => {}); await refresh(); if (t.dataset.link) location.hash = t.dataset.link; render(); break;
-      case 'logout': await backend.logout(); await refresh(); location.hash = '#home'; render(); toast('از حساب خارج شدید'); break;
+      case 'open-notif': ui.notifOpen = false; await backend.action('notifications.read', { id: nid }).catch(() => {}); await refresh(); if (t.dataset.link && (ADMIN_MODE || !t.dataset.link.startsWith('#admin'))) location.hash = t.dataset.link; render(); break;
+      case 'logout':
+        await backend.logout(); await refresh();
+        if (ADMIN_MODE && backend.mode === 'local') { try { sessionStorage.removeItem('sarai-admin'); } catch { /* ignore */ } ADMIN_MODE = false; }
+        location.hash = ADMIN_MODE ? '#admin' : '#home'; render(); toast('از حساب خارج شدید'); break;
       case 'demo-reset': LocalBackend.reset(); await refresh(); location.hash = '#home'; render(); toast('اطلاعات نمونه بازنشانی شد'); break;
       case 'request': openRequest(nid); break;
       case 'fill-amt': { const f = t.closest('form'); f.amount.value = t.dataset.v; f.amount.dispatchEvent(new Event('input', { bubbles: true })); break; }
@@ -2096,6 +2137,11 @@ textarea.input { min-height: 90px; resize: vertical; }
     const showErr = (msg) => { const el = f.querySelector('.form-error'); if (el) { el.textContent = msg; el.classList.remove('hidden'); } else toast(msg, true); };
     try {
       switch (f.dataset.form) {
+        case 'admin-login': {
+          await backend.login(d); await refresh();
+          if (!isAdmin()) { await backend.logout(); await refresh(); throw new Error('این حساب دسترسی مدیریت ندارد'); }
+          location.hash = '#admin'; render(); toast('به پنل مدیریت خوش آمدید'); break;
+        }
         case 'login': await backend.login(d); await refresh(); location.hash = '#dashboard'; render(); toast(`خوش آمدید، ${view.me.company}`); break;
         case 'register': await backend.register(d); await refresh(); location.hash = view.me.status === 'approved' ? '#dashboard' : '#profile'; render(); toast('ثبت‌نام انجام شد'); break;
         case 'order': {
@@ -2168,6 +2214,12 @@ textarea.input { min-height: 90px; resize: vertical; }
     backend = await detect();
     if (backend === ServerBackend && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
     if (backend === LocalBackend) LocalBackend.init();
+    if (backend === ServerBackend) ADMIN_MODE = document.documentElement.dataset.mode === 'admin';
+    else {
+      try { if (location.hash === '#sarai-panel') sessionStorage.setItem('sarai-admin', '1'); ADMIN_MODE = sessionStorage.getItem('sarai-admin') === '1'; }
+      catch { ADMIN_MODE = location.hash === '#sarai-panel'; }
+    }
+    if (ADMIN_MODE) document.title = 'پنل مدیریت — سرای شهزاده';
     await refresh();
     backend.subscribe((v) => { if (v !== view.version) onRemoteChange(); });
     render();
