@@ -1,0 +1,14 @@
+{
+  "name": "shahzada-sarai",
+  "version": "0.1.0",
+  "description": "پلتفرم آنلاین معاملات سرای شهزاده کابل — Shahzada Sarai Digital Trading Platform",
+  "main": "server.js",
+  "private": true,
+  "engines": { "node": ">=22.5" },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node scripts/test.js",
+    "build:demo": "node scripts/build-standalone.js"
+  },
+  "license": "UNLICENSED"
+}
