@@ -438,3 +438,54 @@ textarea.input { min-height: 90px; resize: vertical; }
 }
 [data-theme="light"] .nav a, [data-theme="light"] .tabs a, [data-theme="light"] .bottom-nav a { color: var(--ink-2); }
 [data-theme="light"] .nav a.active, [data-theme="light"] .tabs a.on, [data-theme="light"] .bottom-nav a.active { color: var(--pill-active-ink); }
+
+/* ---------- official rate board ---------- */
+.official { overflow: hidden; }
+.official-head { display: flex; align-items: center; gap: 16px; padding: 22px 22px 8px; flex-wrap: wrap; }
+.official-head h2 { margin: 0; font-size: 20px; }
+.official-meta { text-align: left; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.seal { width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; background: var(--raised); box-shadow: var(--out-sm); color: var(--gold); filter: drop-shadow(0 0 8px rgba(242,193,78,.35)); }
+.official-table td .price { font-size: 17px; }
+
+/* ---------- step tracker ---------- */
+.stepper { list-style: none; margin: 0; padding: 0; display: flex; gap: 0; position: relative; }
+.stepper li { flex: 1; display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px; position: relative; font-size: 13px; color: var(--ink-3); }
+.stepper li::before { content: ''; position: absolute; top: 17px; left: 50%; width: 100%; height: 3px; border-radius: 3px; box-shadow: var(--in-sm); z-index: 0; }
+.stepper li:first-child::before { display: none; }
+.stepper li.done::before, .stepper li.now::before { background: linear-gradient(270deg, var(--cyan), var(--blue)); box-shadow: 0 0 8px rgba(59,130,246,.6); }
+.stepper .dot { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; font-weight: 800; font-size: 14px; background: var(--raised); box-shadow: var(--out-sm); position: relative; z-index: 1; transition: all var(--t) var(--flow); }
+.stepper li.done { color: var(--ink-2); }
+.stepper li.done .dot { background: linear-gradient(135deg, #4f8ff8, #2563eb); color: #fff; }
+.stepper li.now { color: var(--ink); font-weight: 700; }
+.stepper li.now .dot { background: var(--raised); color: var(--blue-2); box-shadow: var(--out-sm), 0 0 0 3px rgba(59,130,246,.5), 0 0 18px rgba(59,130,246,.55); animation: pulseRing 2.2s var(--flow-soft) infinite; }
+@keyframes pulseRing { 50% { box-shadow: var(--out-sm), 0 0 0 6px rgba(59,130,246,.18), 0 0 24px rgba(59,130,246,.6); } }
+.stepper .lbl { max-width: 120px; line-height: 1.5; }
+.step-note { margin-top: 18px; padding: 12px 16px; border-radius: var(--radius-sm); box-shadow: var(--in-sm); font-size: 14px; }
+.stepper-plain { padding-top: 6px; }
+
+/* ---------- action inbox ---------- */
+.todo { display: flex; align-items: center; gap: 12px; padding: 12px 4px; border-bottom: 1px solid var(--line); font-size: 14px; }
+.todo:last-child { border-bottom: 0; }
+.todo-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 10px var(--warn); flex: none; }
+.todo-dot.muted-dot { background: var(--ink-3); box-shadow: none; }
+
+/* ---------- admin modules ---------- */
+.modules { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 18px; }
+.module { display: flex; align-items: center; gap: 14px; padding: 18px; color: inherit !important; }
+.module:hover { transform: translateY(-3px); }
+.module-ico { width: 52px; height: 52px; border-radius: 16px; display: grid; place-items: center; box-shadow: var(--in-sm); color: var(--blue-2); flex: none; }
+.module-txt { flex: 1; display: flex; flex-direction: column; }
+.module-txt b { font-size: 15.5px; }
+.module-txt small { color: var(--ink-3); font-size: 12.5px; line-height: 1.6; }
+.count-badge { background: var(--sell); color: #fff; border-radius: var(--pill); min-width: 26px; height: 26px; display: grid; place-items: center; font-size: 12px; font-weight: 800; padding: 0 8px; box-shadow: 0 0 12px rgba(255,107,122,.6); }
+.secret { font-size: 17px; letter-spacing: 2px; padding: 14px; border-radius: var(--radius-sm); box-shadow: var(--in-sm); text-align: center; word-break: break-all; }
+.rules { margin: 0; padding-inline-start: 22px; display: flex; flex-direction: column; gap: 10px; }
+.foot-links { display: flex; justify-content: center; gap: 18px; flex-wrap: wrap; margin-bottom: 10px; font-size: 13px; }
+
+@media (max-width: 640px) {
+  .stepper .lbl { font-size: 11px; max-width: 70px; }
+  .stepper .dot { width: 30px; height: 30px; font-size: 12px; }
+  .stepper li::before { top: 14px; }
+  .official-meta { align-items: flex-start; text-align: right; width: 100%; }
+  .modules { grid-template-columns: 1fr; }
+}

@@ -1,0 +1,27 @@
+// Fills a temporary database with large volumes and measures key operations.
+'use strict';
+const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const Engine = require('../shared/engine.js');
+const { SqlStore } = require('../sqlstore.js');
+const USERS = Number(process.argv[2] || 200000), ORDERS = Number(process.argv[3] || 100000), DEALS = Number(process.argv[4] || 300000);
+const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sarai-load-')), 'load.db');
+const db = new DatabaseSync(file); db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF;');
+const S = SqlStore(db);
+const now = Date.now(), fast = () => 'x';
+const t = (label, fn) => { const a = process.hrtime.bigint(); const r = fn(); console.log(label.padEnd(44), (Number(process.hrtime.bigint() - a) / 1e6).toFixed(1), 'ms'); return r; };
+t('seed demo', () => S.tx(() => Engine.seed(S, { now, hashPassword: fast })));
+t(`insert ${USERS} users`, () => S.tx(() => { for (let i = 0; i < USERS; i++) S.put('users', { name: 'u' + i, phone: '07' + String(10000000 + i), company: 'صرافی ' + i, activity: 'saraf', role: 'member', status: i % 50 ? 'approved' : 'pending', province: 'کابل', createdAt: now - i * 1000, passHash: 'x' }); }));
+t(`insert ${ORDERS} orders`, () => S.tx(() => { for (let i = 0; i < ORDERS; i++) S.put('orders', { userId: 7 + (i % USERS), side: i % 2 ? 'buy' : 'sell', assetId: 1 + (i % 8), amount: 1000, remaining: 1000, minAmount: 0, price: 65 + (i % 100) / 100, priceCurrency: 'AFN', unit: 'USD', status: i % 5 ? 'closed' : 'active', createdAt: now - i * 500, expiresAt: now + 864e5, updatedAt: now }); }));
+t(`insert ${DEALS} deals`, () => S.tx(() => { for (let i = 0; i < DEALS; i++) S.put('deals', { orderId: 8 + (i % ORDERS), ownerId: 7 + (i % USERS), requesterId: 7 + ((i * 7) % USERS), amount: 10, acceptedAmount: 10, price: 65, status: ['pending', 'accepted', 'completed', 'rejected'][i % 4], createdAt: now - i * 100, updatedAt: now - i * 100 }); }));
+t(`insert ${DEALS} notifications`, () => S.tx(() => { for (let i = 0; i < DEALS; i++) S.put('notifications', { userId: 7 + (i % USERS), text: 'n', link: '', read: i % 3 === 0, at: now - i }); }));
+const runs = (label, n, fn) => { const a = process.hrtime.bigint(); for (let i = 0; i < n; i++) fn(i); console.log(label.padEnd(44), (Number(process.hrtime.bigint() - a) / 1e6 / n).toFixed(2), 'ms avg'); };
+runs('guest market view', 20, () => Engine.buildView(S, null, { now }));
+runs('member view (busy trader)', 20, () => Engine.buildView(S, 2, { now }));
+runs('member view (random member)', 50, (i) => Engine.buildView(S, 100 + i * 997, { now }));
+runs('admin view', 10, () => Engine.buildView(S, 1, { now, scope: 'admin' }));
+runs('login lookup by phone', 500, (i) => Engine.findByPhone(S, '07' + String(10000000 + i * 31)));
+runs('admin search by name', 10, () => Engine.adminUsers(S, 1, { q: 'صرافی 1234' }));
+runs('admin search by phone prefix', 200, () => Engine.adminUsers(S, 1, { q: '0710012' }));
+runs('place order (transaction)', 200, (i) => S.tx(() => Engine.dispatch(S, 8 + i + Math.floor(i / 49), 'order.create', { assetId: 1, side: 'sell', amount: 100 + i, price: 65.3, validHours: 24 }, { now: now + i })));
+console.log('database size:', (fs.statSync(file).size / 1e6).toFixed(0), 'MB');

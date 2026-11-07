@@ -12,6 +12,9 @@ services:
         value: 22.14.0
       - key: SECURE_COOKIE
         value: "1"
+      - key: NODE_ENV
+        value: production
+      # For official launch set SEED=0 and define ADMIN_PHONE / ADMIN_PASSWORD / ADMIN_PATH in the Render dashboard.
     # disk:                 # uncomment on a paid plan so the database survives restarts
     #   name: data
     #   mountPath: /opt/render/project/src/data

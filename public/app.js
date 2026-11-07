@@ -1,177 +1,222 @@
-/* Shahzada Sarai — web client (vanilla JS, RTL). Works against the Node API, or fully in-browser in demo mode. */
+/* Shahzada Sarai — web client (vanilla JS, RTL).
+   Runs against the Node API, or fully in the browser (demo) with the same engine. */
 (function () {
   'use strict';
   const E = window.SaraiEngine;
   const $app = document.getElementById('app');
 
   /* =========================================================
-     Backends
+     Small utilities
      ========================================================= */
-  async function http(path, body) {
-    const res = await fetch(path, body === undefined ? { credentials: 'same-origin' } : {
-      method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || 'خطا در ارتباط با سرور');
-    return data;
-  }
-  const ServerBackend = {
-    mode: 'server',
-    getView: () => http('/api/state'),
-    action: (type, payload) => http('/api/action', { type, payload }).then((r) => r.result),
-    register: (d) => http('/api/register', d),
-    login: (d) => http('/api/login', d),
-    logout: () => http('/api/logout', {}),
-    changePassword: (current, next) => http('/api/password', { current, next }),
-    subscribe(cb) {
-      if (!window.EventSource) return;
-      const es = new EventSource('/api/stream');
-      es.addEventListener('changed', (e) => cb(Number(e.data)));
-    },
-  };
-
-  const KEY = 'sarai-demo-v1', UKEY = 'sarai-demo-uid';
   const store = {
     get(k) { try { return localStorage.getItem(k); } catch { return null; } },
-    set(k, v) { try { localStorage.setItem(k, v); } catch { /* storage unavailable: keep in memory */ } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch { /* storage unavailable */ } },
     del(k) { try { localStorage.removeItem(k); } catch { /* ignore */ } },
   };
-  // Demo-only password hashing (the real server uses scrypt).
-  const demoHash = (pw) => { let h = 5381; for (const c of 'sarai:' + pw) h = ((h * 33) ^ c.charCodeAt(0)) >>> 0; return 'demo$' + h.toString(36); };
-  const LocalBackend = {
-    mode: 'local', state: null, uid: null,
-    init() {
-      const raw = store.get(KEY);
-      try { this.state = raw ? JSON.parse(raw) : null; } catch { this.state = null; }
-      if (!this.state) this.reset(true);
-      const u = Number(store.get(UKEY));
-      this.uid = u || null;
-    },
-    save() { store.set(KEY, JSON.stringify(this.state)); },
-    reset(silent) {
-      this.state = E.emptyState();
-      E.seed(this.state, { now: Date.now(), hashPassword: demoHash });
-      this.save();
-      if (!silent) { this.uid = null; store.del(UKEY); }
-    },
-    setUid(id) { this.uid = id || null; id ? store.set(UKEY, String(id)) : store.del(UKEY); },
-    run(fn) {
-      const snap = JSON.stringify(this.state);
-      try { const r = fn(this.state); this.save(); return r; } catch (e) { this.state = JSON.parse(snap); throw e; }
-    },
-    async getView() { return E.buildView(this.state, this.uid, { now: Date.now() }); },
-    async action(type, payload) { return this.run((s) => E.dispatch(s, this.uid, type, payload, { now: Date.now() })); },
-    async register(d) { const u = this.run((s) => E.register(s, d, { now: Date.now(), hashPassword: demoHash })); this.setUid(u.id); },
-    async login(d) { const u = E.login(this.state, d, { verifyPassword: (pw, h) => demoHash(pw) === h }); this.setUid(u.id); },
-    async logout() { this.setUid(null); },
-    async changePassword(cur, next) {
-      const me = this.state.users.find((u) => u.id === this.uid);
-      if (!me || demoHash(cur) !== me.passHash) throw new Error('رمز فعلی اشتباه است');
-      if (String(next).length < 6) throw new Error('رمز جدید باید حداقل ۶ حرف باشد');
-      this.run(() => { me.passHash = demoHash(next); });
-    },
-    subscribe(cb) {
-      window.addEventListener('storage', (e) => {
-        if (e.key === KEY && e.newValue) { try { this.state = JSON.parse(e.newValue); cb(this.state.version); } catch { /* ignore */ } }
-        if (e.key === UKEY) { this.uid = Number(e.newValue) || null; cb(-1); }
-      });
-    },
-  };
-
-  /* =========================================================
-     State + helpers
-     ========================================================= */
-  let backend = null, view = null, pendingRender = false;
-  // The admin panel is a separate, unlisted entry point (server: ADMIN_PATH; demo: #sarai-panel).
-  let ADMIN_MODE = false;
-  const ui = {
-    filters: { asset: '', side: '', min: '', max: '', minAmount: '', q: '', sort: 'new' },
-    notifOpen: false, menuOpen: false, rateAsset: null, side: 'sell', orderTab: 'all', adminUserFilter: 'all',
-  };
-
+  class ApiError extends Error { constructor(msg, code, status) { super(msg); this.code = code; this.status = status; } }
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const fmt = (n, d = 6) => (n == null || isNaN(n) ? '—' : Number(n).toLocaleString('en-US', { maximumFractionDigits: d }));
   const N = (n, d) => `<span class="num">${fmt(n, d)}</span>`;
   const dateFmt = new Intl.DateTimeFormat('fa-AF', { dateStyle: 'medium', timeStyle: 'short' });
+  const longDate = new Intl.DateTimeFormat('fa-AF', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  const timeFmt = new Intl.DateTimeFormat('fa-AF', { hour: '2-digit', minute: '2-digit' });
   const dayFmt = new Intl.DateTimeFormat('fa-AF', { month: 'short', day: 'numeric' });
   const fmtDate = (t) => (t ? dateFmt.format(new Date(t)) : '—');
   function ago(t) {
     const s = Math.round((Date.now() - t) / 1000);
-    if (s < 60) return 'همین حالا';
+    if (s < 60) return 'لحظاتی پیش';
     if (s < 3600) return `${Math.floor(s / 60)} دقیقه پیش`;
     if (s < 86400) return `${Math.floor(s / 3600)} ساعت پیش`;
     return `${Math.floor(s / 86400)} روز پیش`;
   }
   function left(t) {
-    if (!t) return 'بدون محدودیت';
+    if (!t) return 'تا بستن دستی';
     const s = Math.round((t - Date.now()) / 1000);
     if (s <= 0) return 'منقضی';
-    if (s < 3600) return `${Math.ceil(s / 60)} دقیقه مانده`;
-    if (s < 86400) return `${Math.floor(s / 3600)} ساعت مانده`;
-    return `${Math.floor(s / 86400)} روز مانده`;
+    if (s < 3600) return `${Math.ceil(s / 60)} دقیقه`;
+    if (s < 86400) return `${Math.floor(s / 3600)} ساعت`;
+    return `${Math.floor(s / 86400)} روز`;
   }
+  const qs = (o) => Object.entries(o).filter(([, v]) => v !== '' && v != null).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+
+  /* =========================================================
+     Backends
+     ========================================================= */
+  const ServerBackend = {
+    mode: 'server', scope: 'user',
+    async req(path, body) {
+      const headers = this.scope === 'admin' ? { 'X-Scope': 'admin' } : {};
+      const res = await fetch(path, body === undefined ? { credentials: 'same-origin', headers } : {
+        method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new ApiError(data.error || 'خطا در ارتباط با سرور.', data.code, res.status);
+      return data;
+    },
+    getView() { return this.req('/api/state'); },
+    action(type, payload, password) { return this.req('/api/action', { type, payload, password }).then((r) => r.result); },
+    register(d) { return this.req('/api/register', d); },
+    login(d) { return this.req(this.scope === 'admin' ? '/api/admin/login' : '/api/login', d); },
+    logout() { return this.req('/api/logout', {}); },
+    changePassword(current, next) { return this.req('/api/password', { current, next }); },
+    adminUsers(params) { return this.req('/api/admin/users?' + qs(params)); },
+    totpSetup() { return this.req('/api/admin/2fa/setup', {}); },
+    totpEnable(code, password) { return this.req('/api/admin/2fa/enable', { code, password }); },
+    totpDisable(code, password) { return this.req('/api/admin/2fa/disable', { code, password }); },
+    subscribe(onMe, onMarket) {
+      if (!window.EventSource) return;
+      const es = new EventSource('/api/stream');
+      es.addEventListener('me', onMe);
+      es.addEventListener('market', onMarket);
+    },
+  };
+
+  // Demo backend: same engine over an in-browser store. Data stays in this browser only.
+  const KEY = 'sarai-demo-v2';
+  const demoHash = (pw) => { let h = 5381; for (const c of 'sarai:' + pw) h = ((h * 33) ^ c.charCodeAt(0)) >>> 0; return 'demo$' + h.toString(36); };
+  const LocalBackend = {
+    mode: 'local', scope: 'user', S: null,
+    init() {
+      let data = null;
+      try { data = JSON.parse(store.get(KEY) || 'null'); } catch { data = null; }
+      this.S = E.MemoryStore(data || undefined);
+      if (!data) { E.seed(this.S, { now: Date.now(), hashPassword: demoHash }); this.save(); }
+    },
+    uidKey() { return this.scope === 'admin' ? 'sarai-demo-admin' : 'sarai-demo-uid'; },
+    get uid() { return Number(store.get(this.uidKey())) || null; },
+    setUid(id) { id ? store.set(this.uidKey(), String(id)) : store.del(this.uidKey()); },
+    save() { store.set(KEY, JSON.stringify(this.S.dump())); },
+    reset() { store.del(KEY); store.del('sarai-demo-uid'); store.del('sarai-demo-admin'); this.init(); },
+    run(fn) { const r = this.S.tx(fn); this.save(); return r; },
+    wrap(fn) { try { return Promise.resolve(fn()); } catch (e) { return Promise.reject(new ApiError(e.message, e.code)); } },
+    getView() { return this.wrap(() => E.buildView(this.S, this.uid, { now: Date.now(), scope: this.scope })); },
+    action(type, payload, password) {
+      return this.wrap(() => {
+        if (E.SENSITIVE.has(type)) { const u = this.S.get('users', this.uid); if (!u || demoHash(password || '') !== u.passHash) throw new ApiError('برای این عملیات رمز عبور خود را درست وارد کنید.', 'unauthorized'); }
+        return this.run(() => E.dispatch(this.S, this.uid, type, payload, { now: Date.now(), scope: this.scope }));
+      });
+    },
+    register(d) { return this.wrap(() => { const u = this.run(() => E.register(this.S, d, { now: Date.now() }, { hashPassword: demoHash })); this.setUid(u.id); return { ok: true }; }); },
+    login(d) {
+      return this.wrap(() => {
+        const u = E.findByPhone(this.S, d.phone);
+        if (!u || demoHash(String(d.password || '')) !== u.passHash) throw new ApiError('شماره یا رمز عبور نادرست است.', 'unauthorized');
+        if (u.status === 'blocked') throw new ApiError('حساب شما مسدود است.', 'forbidden');
+        if (this.scope === 'admin' && u.role !== 'admin') throw new ApiError('این حساب دسترسی مدیریت ندارد.', 'forbidden');
+        this.setUid(u.id); return { ok: true };
+      });
+    },
+    logout() { this.setUid(null); return Promise.resolve(); },
+    changePassword(cur, next) {
+      return this.wrap(() => {
+        const u = this.S.get('users', this.uid);
+        if (!u || demoHash(cur) !== u.passHash) throw new ApiError('رمز فعلی نادرست است.');
+        if (String(next).length < 8) throw new ApiError('رمز جدید باید حداقل ۸ حرف باشد.');
+        this.run(() => { u.passHash = demoHash(next); this.S.put('users', u); });
+      });
+    },
+    adminUsers(params) { return this.wrap(() => E.adminUsers(this.S, this.uid, params)); },
+    totpSetup() { return Promise.reject(new ApiError('تأیید دومرحله‌ای فقط در نسخه اصلی سایت فعال است.')); },
+    totpEnable() { return this.totpSetup(); },
+    totpDisable() { return this.totpSetup(); },
+    subscribe(onMe) {
+      window.addEventListener('storage', (e) => {
+        if (e.key === KEY && e.newValue) { try { this.S = E.MemoryStore(JSON.parse(e.newValue)); onMe(); } catch { /* ignore */ } }
+        if (e.key === this.uidKey()) onMe();
+      });
+    },
+  };
+
+  /* =========================================================
+     State
+     ========================================================= */
+  let backend = null, view = null, pendingRender = false, ADMIN_MODE = false;
+  const ui = {
+    filters: { asset: '', side: '', min: '', max: '', minAmount: '', q: '', sort: 'new' },
+    notifOpen: false, rateAsset: null, side: 'sell', dealFilter: 'active',
+    members: { status: 'pending', q: '', list: null, total: 0, loading: false, offset: 0 },
+    adminLogin: { need2fa: false, phone: '', password: '' },
+    totp: null,
+  };
   const asset = (id) => view.assets.find((a) => a.id === id) || { code: '?', name: '?', unit: '' };
-  const user = (id) => (view.users || []).find((u) => u.id === id) || (view.admin && view.admin.users.find((u) => u.id === id));
+  const user = (id) => view.users.find((u) => u.id === id) || (ui.members.list || []).find((u) => u.id === id) || ((view.admin && view.admin.pending) || []).find((u) => u.id === id);
   const orderOf = (id) => view.orders.find((o) => o.id === id);
   const me = () => view.me;
   const approved = () => !!(view.me && view.me.status === 'approved');
-  const isAdmin = () => !!(view.me && view.me.role === 'admin' && view.me.status === 'approved');
+  const isAdmin = () => !!(view.scope === 'admin' && view.me && view.me.role === 'admin');
 
+  /* =========================================================
+     Icons & small components
+     ========================================================= */
+  const svg = (d, w = 20) => `<svg width="${w}" height="${w}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
   const ICON = {
-    check: '<svg class="verified" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-label="تأییدشده"><path d="M12 1l2.6 2.2 3.4-.4.9 3.3 3 1.7-1.2 3.2 1.2 3.2-3 1.7-.9 3.3-3.4-.4L12 23l-2.6-2.2-3.4.4-.9-3.3-3-1.7L3.3 13 2.1 9.8l3-1.7.9-3.3 3.4.4z"/><path d="M10.5 15.6l-3.2-3.2 1.4-1.4 1.8 1.8 4.8-4.8 1.4 1.4z" fill="#fff"/></svg>',
-    bell: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 01-3.4 0"/></svg>',
-    menu: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/></svg>',
-    box: '<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 8l-9-5-9 5 9 5 9-5zM3 8v8l9 5 9-5V8M12 13v8"/></svg>',
-    sun: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
-    moon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/></svg>',
-    nHome: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7v9a1 1 0 01-1 1h-5v-6H9v6H4a1 1 0 01-1-1z"/></svg>',
-    nMarket: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4v16M7 4l-3 3M7 4l3 3M17 20V4M17 20l-3-3M17 20l3-3"/></svg>',
-    nRates: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18M5 16l4-5 4 3 6-8"/></svg>',
-    nNew: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>',
-    nDash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="2"/><rect x="14" y="3" width="7" height="5" rx="2"/><rect x="14" y="12" width="7" height="9" rx="2"/><rect x="3" y="16" width="7" height="5" rx="2"/></svg>',
-    nAdmin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg>',
-    logo: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M3 21h18M5 21V10l7-6 7 6v11M9 21v-6h6v6M9 11h.01M15 11h.01"/></svg>',
+    check: '<svg class="verified" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-label="تأیید شده"><path d="M12 1l2.6 2.2 3.4-.4.9 3.3 3 1.7-1.2 3.2 1.2 3.2-3 1.7-.9 3.3-3.4-.4L12 23l-2.6-2.2-3.4.4-.9-3.3-3-1.7L3.3 13 2.1 9.8l3-1.7.9-3.3 3.4.4z"/><path d="M10.5 15.6l-3.2-3.2 1.4-1.4 1.8 1.8 4.8-4.8 1.4 1.4z" fill="#fff"/></svg>',
+    bell: svg('<path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 01-3.4 0"/>'),
+    box: svg('<path d="M21 8l-9-5-9 5 9 5 9-5zM3 8v8l9 5 9-5V8M12 13v8"/>', 40),
+    sun: svg('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>'),
+    moon: svg('<path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/>'),
+    logo: svg('<path d="M3 21h18M5 21V10l7-6 7 6v11M9 21v-6h6v6M9 11h.01M15 11h.01"/>', 22),
+    shield: svg('<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/>', 22),
+    users: svg('<path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.9M16 3.1a4 4 0 010 7.8"/>', 24),
+    rate: svg('<path d="M3 20h18M5 16l4-5 4 3 6-8"/>', 24),
+    list: svg('<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>', 24),
+    deal: svg('<path d="M7 4v16M7 4l-3 3M7 4l3 3M17 20V4M17 20l-3-3M17 20l3-3"/>', 24),
+    flag: svg('<path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1zM4 22v-7"/>', 24),
+    megaphone: svg('<path d="M3 11v2a1 1 0 001 1h3l5 4V6L7 10H4a1 1 0 00-1 1zM16 8a5 5 0 010 8"/>', 24),
+    coins: svg('<circle cx="8" cy="8" r="6"/><path d="M18.1 10.4A6 6 0 1110.4 18M7 6h1v4M16.7 13.9l.7.7-2.8 2.8"/>', 24),
+    chart: svg('<path d="M18 20V10M12 20V4M6 20v-6"/>', 24),
+    lock: svg('<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/>', 24),
+    history: svg('<path d="M3 3v5h5M3.05 13A9 9 0 106 5.3L3 8M12 7v5l4 2"/>', 24),
+    seal: svg('<circle cx="12" cy="9" r="6"/><path d="M9 14.5L7 22l5-3 5 3-2-7.5M9.5 9l1.8 1.8L15 7"/>', 22),
+    nHome: svg('<path d="M3 11l9-7 9 7v9a1 1 0 01-1 1h-5v-6H9v6H4a1 1 0 01-1-1z"/>'),
+    nMarket: svg('<path d="M7 4v16M7 4l-3 3M7 4l3 3M17 20V4M17 20l-3-3M17 20l3-3"/>'),
+    nRates: svg('<path d="M3 20h18M5 16l4-5 4 3 6-8"/>'),
+    nNew: svg('<circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/>'),
+    nDash: svg('<rect x="3" y="3" width="7" height="9" rx="2"/><rect x="14" y="3" width="7" height="5" rx="2"/><rect x="14" y="12" width="7" height="9" rx="2"/><rect x="3" y="16" width="7" height="5" rx="2"/>'),
     wa: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 00-8.6 15.1L2 22l5-1.3A10 10 0 1012 2zm5.3 14.2c-.2.6-1.3 1.2-1.8 1.2-.5.1-1 .2-3.3-.7-2.8-1.1-4.5-3.9-4.7-4.1-.1-.2-1.1-1.5-1.1-2.8s.7-2 1-2.3c.2-.3.5-.3.7-.3h.5c.2 0 .4 0 .6.5l.9 2.1c.1.2.1.4 0 .5l-.3.5-.4.4c-.1.1-.3.3-.1.6.2.3.7 1.2 1.6 1.9 1.1.9 2 1.2 2.3 1.4.3.1.5.1.6-.1l.9-1c.2-.3.4-.2.6-.1l2 .9c.3.1.5.2.5.3.1.2.1.7-.1 1.2z"/></svg>',
   };
-
-  const sideBadge = (side) => side === 'sell' ? '<span class="badge sell">فروش</span>' : '<span class="badge buy">خرید</span>';
+  const sideBadge = (side) => (side === 'sell' ? '<span class="badge sell">فروش</span>' : '<span class="badge buy">خرید</span>');
   const ORDER_CLS = { active: 'ok', filled: 'blue', closed: '', cancelled: 'bad', expired: 'warn' };
   const DEAL_CLS = { pending: 'warn', accepted: 'blue', completed: 'ok', rejected: 'bad', cancelled: 'bad' };
   const orderBadge = (s) => `<span class="badge ${ORDER_CLS[s] || ''}">${E.ORDER_STATUS[s] || s}</span>`;
   const dealBadge = (s) => `<span class="badge ${DEAL_CLS[s] || ''}">${E.DEAL_STATUS[s] || s}</span>`;
-  const userBadge = (s) => `<span class="badge ${s === 'approved' ? 'ok' : s === 'blocked' || s === 'rejected' ? 'bad' : 'warn'}">${E.USER_STATUS[s]}</span>`;
-  const provinceOptions = (sel) => `<option value="">انتخاب ولایت</option>${E.PROVINCES.map((p) => `<option ${p === sel ? 'selected' : ''}>${p}</option>`).join('')}`;
-  function kycInputs(u = {}) {
-    return `<div class="grid g2">
-        <label class="field"><span>ولایت</span><select class="input" name="province" required>${provinceOptions(u.province)}</select></label>
-        <label class="field"><span>شهر / ولسوالی</span><input class="input" name="city" value="${esc(u.city || '')}"></label>
-      </div>
-      <label class="field"><span>آدرس دفتر یا دکان</span><input class="input" name="address" value="${esc(u.address || '')}" placeholder="مثلاً: سرای شهزاده، منزل دوم، دکان ۱۲" required></label>
-      <div class="grid g2">
-        <label class="field"><span>سابقه کار</span><input class="input" name="experience" value="${esc(u.experience || '')}" placeholder="مثلاً ۸ سال"></label>
-        <label class="field"><span>نام ضامن یا معرف (اختیاری)</span><input class="input" name="guarantorName" value="${esc(u.guarantorName || '')}"></label>
-      </div>
-      <label class="field"><span>شماره تماس ضامن (اختیاری)</span><input class="input num" name="guarantorPhone" inputmode="tel" value="${esc(u.guarantorPhone || '')}"></label>
-      <label class="field"><span>توضیح درباره کار شما (اختیاری)</span><textarea class="input" name="about" placeholder="چه ارزها یا کالاهایی معامله می‌کنید؟">${esc(u.about || '')}</textarea></label>`;
-  }
+  const userBadge = (s) => `<span class="badge ${s === 'approved' ? 'ok' : s === 'blocked' || s === 'rejected' ? 'bad' : 'warn'}">${E.USER_STATUS[s] || s}</span>`;
   const assetChip = (a, sub) => `<span class="asset-chip"><span class="asset-ico ${a.kind === 'metal' ? 'metal-' + a.code : ''}">${esc(a.code)}</span><span>${esc(a.name)}${sub ? `<div class="muted small" style="font-weight:400">${sub}</div>` : ''}</span></span>`;
   function nameLink(id) {
     const u = user(id);
-    if (!u) return '<span class="muted">🔒 فقط برای اعضا</span>';
-    return `<a href="#user-${u.id}">${esc(u.company || u.name)}</a> ${u.status === 'approved' ? ICON.check : ''}`;
+    if (!u) return '<span class="muted">مخصوص اعضا</span>';
+    return `<a href="#${ADMIN_MODE ? 'admin-review-' : 'user-'}${u.id}">${esc(u.company || u.name)}</a> ${u.status === 'approved' ? ICON.check : ''}`;
   }
   const emptyBox = (text) => `<div class="empty">${ICON.box}${esc(text)}</div>`;
   const total = (o, amt) => (amt == null ? o.amount : amt) * o.price;
   const qty = (o, amt) => `${N(amt == null ? o.amount : amt)} <span class="muted small">${esc(o.unit)}</span>`;
+  const waHref = (ph) => `https://wa.me/${esc(String(ph).replace(/^0/, '93').replace(/\D/g, ''))}`;
+  const pageHead = (title, sub, actions = '') => `<div class="page-head"><div><h1>${title}</h1>${sub ? `<p>${sub}</p>` : ''}</div>${actions ? `<div class="row">${actions}</div>` : ''}</div>`;
+
+  let ringSeq = 0;
+  function ringSvg(frac, size, stroke, c1, c2) {
+    const id = 'rg' + (++ringSeq), r = (size - stroke) / 2, len = 2 * Math.PI * r;
+    const off = len * (1 - Math.max(0.02, Math.min(1, frac)));
+    return `<svg viewBox="0 0 ${size} ${size}" width="${size}" height="${size}"><defs><linearGradient id="${id}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${c1}"/><stop offset="1" stop-color="${c2}"/></linearGradient></defs>
+      <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="rgba(127,127,127,.12)" stroke-width="${stroke}"/>
+      <circle class="arc" style="--len:${len.toFixed(1)}" cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="url(#${id})" stroke-width="${stroke}" stroke-linecap="round" stroke-dasharray="${len.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}"/></svg>`;
+  }
+
+  // Step tracker used on order and deal pages so every party sees where a transaction stands.
+  function stepper(steps, current, note) {
+    return `<div class="card card-pad stepper-card">
+      <ol class="stepper">${steps.map((s, i) => `<li class="${i < current ? 'done' : i === current ? 'now' : ''}"><span class="dot">${i < current ? '✓' : i + 1}</span><span class="lbl">${s}</span></li>`).join('')}</ol>
+      ${note ? `<div class="step-note">${note}</div>` : ''}</div>`;
+  }
 
   /* =========================================================
-     Toasts, modals
+     Toasts, modals, password confirmation
      ========================================================= */
   function toast(msg, err) {
     let w = document.querySelector('.toast-wrap');
     if (!w) { w = document.createElement('div'); w.className = 'toast-wrap'; document.body.appendChild(w); }
     const t = document.createElement('div'); t.className = 'toast' + (err ? ' err' : ''); t.textContent = msg;
-    w.appendChild(t); setTimeout(() => t.remove(), err ? 4500 : 3000);
+    w.appendChild(t); setTimeout(() => t.remove(), err ? 5000 : 3200);
   }
   function modal(title, body) {
     closeModal();
@@ -180,14 +225,44 @@
     bg.innerHTML = `<div class="modal card" role="dialog" aria-modal="true"><div class="modal-head"><h3>${title}</h3><button class="x" data-act="close-modal" aria-label="بستن">×</button></div><div class="card-pad">${body}</div></div>`;
     bg.addEventListener('click', (e) => { if (e.target === bg) closeModal(); });
     document.body.appendChild(bg);
-    const first = bg.querySelector('input, textarea, select'); if (first) first.focus();
+    const first = bg.querySelector('input:not([type=hidden]), textarea, select'); if (first) first.focus();
   }
   function closeModal() { document.querySelectorAll('.modal-bg').forEach((m) => m.remove()); }
+
+  // Sensitive admin actions: ask for the password, handle the large-change confirmation.
+  let pendingSensitive = null;
+  function sensitive(type, payload, okMsg, summary) {
+    pendingSensitive = { type, payload, okMsg };
+    modal('تأیید با رمز عبور', `<form data-form="sensitive" class="stack">
+      ${summary ? `<div class="notice">${summary}</div>` : ''}
+      <label class="field"><span>رمز عبور مدیر</span><input class="input" type="password" name="password" required autocomplete="current-password"></label>
+      <div class="form-error hidden"></div>
+      <button class="btn btn-primary btn-block">تأیید و ثبت</button></form>`);
+  }
+  async function runSensitive(password, extra = {}) {
+    const p = pendingSensitive; if (!p) return;
+    try {
+      await backend.action(p.type, { ...p.payload, ...extra }, password);
+      pendingSensitive = null; await refresh(); closeModal(); render(); if (p.okMsg) toast(p.okMsg);
+    } catch (e) {
+      if (e.code === 'confirm') {
+        modal('تأیید تغییر بزرگ نرخ', `<form data-form="confirm-large" class="stack"><div class="notice warn">${esc(e.message)}</div>
+          <input type="hidden" name="password" value="${esc(password)}">
+          <button class="btn btn-sell btn-block">ارقام درست است؛ ثبت شود</button><button type="button" class="btn btn-block" data-act="close-modal">انصراف</button></form>`);
+        return;
+      }
+      throw e;
+    }
+  }
 
   /* =========================================================
      Data flow
      ========================================================= */
-  async function refresh() { view = await backend.getView(); if (lastNotifId === null && view.me) systemNotify(); }
+  async function refresh() {
+    view = await backend.getView();
+    if (view.sessionExpired && ADMIN_MODE) toast('نشست مدیریت به دلیل عدم فعالیت پایان یافت.', true);
+    systemNotify();
+  }
   async function act(type, payload, okMsg) {
     try {
       const r = await backend.action(type, payload);
@@ -197,6 +272,17 @@
     } catch (e) { toast(e.message, true); throw e; }
   }
   const busy = () => document.querySelector('.modal-bg') || (document.activeElement && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) && document.activeElement.value);
+  async function onRemoteChange() {
+    try { await refresh(); } catch { return; }
+    if (busy()) { pendingRender = true; return; }
+    render();
+  }
+  let marketTimer = null;
+  const onMarket = () => { clearTimeout(marketTimer); marketTimer = setTimeout(onRemoteChange, 300 + Math.random() * 2500); };
+  setInterval(() => { if (pendingRender && !busy()) { pendingRender = false; render(); } }, 1500);
+  setInterval(() => { if (view && !busy()) render(); }, 60e3);
+
+  // Phone notifications (while the site or installed app is open).
   let lastNotifId = null;
   function systemNotify() {
     if (!view || !view.me) { lastNotifId = null; return; }
@@ -211,14 +297,8 @@
       else { try { new Notification('سرای شهزاده', opts); } catch { /* ignore */ } }
     }
   }
-  async function onRemoteChange() {
-    await refresh();
-    systemNotify();
-    if (busy()) { pendingRender = true; return; }
-    render();
-  }
-  setInterval(() => { if (pendingRender && !busy()) { pendingRender = false; render(); } }, 1500);
-  setInterval(() => { if (view && !busy()) render(); }, 60e3); // keep relative times fresh
+  const notifPermissionButton = () => (backend.mode === 'server' && 'Notification' in window && Notification.permission === 'default'
+    ? '<button class="btn btn-sm" data-act="enable-push">فعال‌سازی اعلان روی گوشی</button>' : '');
 
   /* =========================================================
      Layout
@@ -228,64 +308,65 @@
     if (ADMIN_MODE) return !r || r === 'home' || r === 'sarai-panel' ? 'admin' : r;
     return r || 'home';
   };
-  function adminHeader() {
-    const m = me();
-    const unread = m ? view.notifications.filter((n) => !n.read).length : 0;
-    return `<header class="topbar"><div class="topbar-inner">
-      <a class="brand" href="#admin"><span class="brand-mark">${ICON.nAdmin.replace('<svg ', '<svg width="22" height="22" style="color:var(--blue-2)" ')}</span><span><b>پنل مدیریت</b><small>سرای شهزاده — دسترسی محدود</small></span></a>
-      <div class="top-actions">
-        ${isAdmin() ? `<button class="bell" data-act="toggle-notifs" aria-label="اعلان‌ها">${ICON.bell}${unread ? `<span class="dot">${unread}</span>` : ''}</button>` : ''}
-        <button class="bell" data-act="theme" aria-label="تغییر تم">${document.documentElement.dataset.theme === 'light' ? ICON.moon : ICON.sun}</button>
-        ${m ? `<button class="btn btn-light btn-sm" data-act="logout">خروج</button>` : ''}
-      </div></div></header>
-    ${ui.notifOpen && isAdmin() ? notifDrawer() : ''}`;
+  function themeBtn() { return `<button class="bell" data-act="theme" aria-label="تغییر حالت نمایش">${document.documentElement.dataset.theme === 'light' ? ICON.moon : ICON.sun}</button>`; }
+  function bellBtn() {
+    const n = view.unread || 0;
+    return `<button class="bell" data-act="toggle-notifs" aria-label="اعلان‌ها">${ICON.bell}${n ? `<span class="dot">${n > 99 ? '99+' : n}</span>` : ''}</button>`;
   }
   function header() {
-    if (ADMIN_MODE) return adminHeader();
-    const r = route();
-    const m = me();
-    const unread = m ? view.notifications.filter((n) => !n.read).length : 0;
+    if (ADMIN_MODE) {
+      return `<header class="topbar"><div class="topbar-inner">
+        <a class="brand" href="#admin"><span class="brand-mark">${ICON.shield}</span><span><b>پنل مدیریت</b><small>سرای شهزاده کابل</small></span></a>
+        <div class="top-actions">${isAdmin() ? bellBtn() : ''}${themeBtn()}${me() ? '<button class="btn btn-light btn-sm" data-act="logout">خروج</button>' : ''}</div>
+      </div></header>${ui.notifOpen && isAdmin() ? notifDrawer() : ''}`;
+    }
+    const r = route(), m = me();
     const link = (href, label) => `<a href="#${href}" class="${r === href || r.startsWith(href + '-') ? 'active' : ''}">${label}</a>`;
-    const tickerItems = view.rates.map((rt) => {
+    const tick = view.rates.map((rt) => {
       const a = asset(rt.assetId); const mid = (rt.buy + rt.sell) / 2;
       const ch = rt.prevMid ? ((mid - rt.prevMid) / rt.prevMid) * 100 : 0;
       return `<span><b>${esc(a.name)}</b> <span class="num">${fmt(rt.buy)} / ${fmt(rt.sell)}</span> <span class="num ${ch >= 0 ? 'up' : 'down'}">${ch >= 0 ? '▲' : '▼'} ${Math.abs(ch).toFixed(2)}%</span></span>`;
     }).join('');
-    return `
-    <header class="topbar">
+    return `<header class="topbar">
       <div class="topbar-inner">
-        <a class="brand" href="#home"><span class="brand-mark">${ICON.logo}</span><span><b>سرای شهزاده</b><small>بازار دیجیتال معاملات کابل</small></span></a>
-        <nav class="nav ${ui.menuOpen ? 'open' : ''}">
-          ${link('home', 'صفحه اصلی')}${link('market', 'بازار معاملات')}${link('rates', 'نرخ ارزها')}${link('new', 'ثبت سفارش')}
-          ${m ? link('dashboard', 'داشبورد') : ''}${m ? `<a href="#profile" class="mobile-only">پروفایل (${esc(m.company || m.name)})</a>` : ''}
-        </nav>
+        <a class="brand" href="#home"><span class="brand-mark">${ICON.logo}</span><span><b>سرای شهزاده</b><small>بازار معاملات ارز و فلزات قیمتی — کابل</small></span></a>
+        <nav class="nav">${link('home', 'صفحه اصلی')}${link('rates', 'نرخ رسمی')}${link('market', 'بازار')}${link('new', 'ثبت سفارش')}${m ? link('dashboard', 'داشبورد') : ''}</nav>
         <div class="top-actions">
-          ${m ? `<button class="bell" data-act="toggle-notifs" aria-label="اعلان‌ها">${ICON.bell}${unread ? `<span class="dot">${unread}</span>` : ''}</button>
-                 <a class="btn btn-light btn-sm me-btn" href="#profile">${esc(m.company || m.name)}</a>
-                 <button class="btn btn-light btn-sm" data-act="logout"><span class="btn-text">خروج</span><span aria-hidden="true">⎋</span></button>`
-              : `<a class="btn btn-light btn-sm" href="#login">ورود</a><a class="btn btn-primary btn-sm" href="#register">ثبت‌نام</a>`}
-          <button class="bell" data-act="theme" aria-label="تغییر تم">${document.documentElement.dataset.theme === 'light' ? ICON.moon : ICON.sun}</button>
+          ${m ? `${bellBtn()}<a class="btn btn-light btn-sm me-btn" href="#profile">${esc(m.company || m.name)}</a><button class="btn btn-sm" data-act="logout">خروج</button>`
+              : '<a class="btn btn-sm" href="#login">ورود</a><a class="btn btn-primary btn-sm" href="#register">عضویت</a>'}
+          ${themeBtn()}
         </div>
       </div>
-      ${view.rates.length ? `<div class="ticker"><div class="ticker-track">${tickerItems}${tickerItems}</div></div>` : ''}
+      ${tick ? `<div class="ticker"><div class="ticker-track">${tick}${tick}</div></div>` : ''}
     </header>
     ${backend.mode === 'local' ? demoBar() : ''}
     ${ui.notifOpen && m ? notifDrawer() : ''}`;
   }
   function demoBar() {
-    const users = LocalBackend.state.users.filter((u) => u.role !== 'admin');
-    return `<div class="demo-bar">نسخه نمایشی — اطلاعات فقط در همین مرورگر ذخیره می‌شود. ورود سریع به‌عنوان:
-      <select data-change="demo-switch"><option value="">— مهمان —</option>${users.map((u) => `<option value="${u.id}" ${view.me && view.me.id === u.id ? 'selected' : ''}>${esc(u.company)}${u.role === 'admin' ? ' (مدیر)' : u.status !== 'approved' ? ' (تأییدنشده)' : ''}</option>`).join('')}</select>
-      <button data-act="demo-reset">بازنشانی اطلاعات نمونه</button></div>`;
+    const users = LocalBackend.S.find('users', { role: 'member' });
+    return `<div class="demo-bar">نسخه آزمایشی — داده‌ها فقط در همین مرورگر ذخیره می‌شود. ورود به‌عنوان:
+      <select data-change="demo-switch"><option value="">مهمان</option>${users.map((u) => `<option value="${u.id}" ${view.me && view.me.id === u.id ? 'selected' : ''}>${esc(u.company)}${u.status !== 'approved' ? ' (در انتظار)' : ''}</option>`).join('')}</select>
+      <button data-act="demo-reset">بازنشانی</button></div>`;
   }
   function notifDrawer() {
     const list = view.notifications;
     return `<div class="drawer card">
-      <div class="row card-pad" style="padding:12px 16px;border-bottom:1px solid var(--line)"><b>اعلان‌ها</b><span class="spacer"></span>
-      ${list.some((n) => !n.read) ? '<button class="btn btn-ghost btn-sm" data-act="read-all">همه خوانده شد</button>' : ''}</div>
+      <div class="row" style="padding:12px 16px;border-bottom:1px solid var(--line)"><b>اعلان‌ها</b><span class="spacer"></span>
+      ${view.unread ? '<button class="btn btn-ghost btn-sm" data-act="read-all">علامت‌گذاری همه</button>' : ''}</div>
       ${notifPermissionButton() ? `<div style="padding:10px 16px;border-bottom:1px solid var(--line)">${notifPermissionButton()}</div>` : ''}
-      ${list.length ? list.slice(0, 30).map((n) => `<div class="notif ${n.read ? '' : 'unread'}" data-act="open-notif" data-id="${n.id}" data-link="${esc(n.link)}">${esc(n.text)}<time>${ago(n.at)}</time></div>`).join('') : emptyBox('اعلانی ندارید')}
+      ${list.length ? list.slice(0, 30).map((n) => `<div class="notif ${n.read ? '' : 'unread'}" data-act="open-notif" data-id="${n.id}" data-link="${esc(n.link)}">${esc(n.text)}<time>${ago(n.at)}</time></div>`).join('') : emptyBox('اعلانی وجود ندارد.')}
     </div>`;
+  }
+  function bottomNav(r) {
+    const items = [['home', 'خانه', ICON.nHome], ['rates', 'نرخ رسمی', ICON.nRates], ['new', 'ثبت', ICON.nNew], ['market', 'بازار', ICON.nMarket],
+      me() ? ['dashboard', 'داشبورد', ICON.nDash] : ['login', 'ورود', ICON.nDash]];
+    return `<nav class="bottom-nav">${items.map(([h, l, ic]) => `<a href="#${h}" class="${r === h || r.startsWith(h + '-') ? 'active' : ''}">${ic}<span>${l}</span></a>`).join('')}</nav>`;
+  }
+  function footer() {
+    if (ADMIN_MODE) return '<footer class="footer">دسترسی به این بخش محدود به مدیران مجاز است. همه عملیات ثبت و نگهداری می‌شود.</footer>';
+    return `<footer class="footer">
+      <div class="foot-links"><a href="#about">درباره سامانه</a><a href="#rules">قوانین و مقررات</a><a href="#rates">نرخ رسمی</a><a href="#market">بازار</a></div>
+      سرای شهزاده کابل — سامانه ثبت پیشنهاد و ارتباط معامله‌گران. پرداخت و تحویل خارج از سامانه و مستقیماً میان طرفین انجام می‌شود.</footer>`;
   }
 
   function render() {
@@ -295,58 +376,31 @@
     try { page = pageFor(r); } catch (e) { console.error(e); page = `<div class="card card-pad">${esc(e.message)}</div>`; }
     const scrollY = window.scrollY;
     const entering = render.lastRoute !== r;
-    $app.innerHTML = `${header()}<main class="${entering ? 'enter' : ''}">${page}</main>${ADMIN_MODE ? '' : bottomNav(r)}
-      <footer class="footer">سرای شهزاده کابل — بستر معرفی پیشنهاد و ارتباط خریدار و فروشنده. انتقال پول و تسویه در این سایت انجام نمی‌شود.</footer>`;
-    if (render.lastRoute === r) window.scrollTo(0, scrollY); else window.scrollTo(0, 0);
+    $app.innerHTML = `${header()}<main class="${entering ? 'enter' : ''}">${page}</main>${ADMIN_MODE ? '' : bottomNav(r)}${footer()}`;
+    window.scrollTo(0, entering ? 0 : scrollY);
     render.lastRoute = r;
     if (entering) countUp();
     const chat = document.querySelector('.chat'); if (chat) chat.scrollTop = chat.scrollHeight;
-    afterRender();
+    afterRender(r);
   }
-
-  function adminBanner() {
-    const A = view.admin; if (!A) return '';
-    const pend = A.users.filter((u) => u.status === 'pending').length, reps = A.reports.filter((x) => x.status === 'open').length;
-    return `<a href="#admin-users" class="card card-pad sheen glow ${pend ? 'g-warm' : ''}" style="display:flex;align-items:center;gap:16px;margin:22px 0;color:inherit">
-      <span class="asset-ico" style="width:52px;height:52px">${ICON.nAdmin.replace('<svg ', '<svg width="24" height="24" ')}</span>
-      <span style="flex:1"><b style="font-size:17px">پنل مدیریت</b><div class="muted small">همه اعضا: <span class="num">${A.users.length}</span> · منتظر تأیید: <b class="num" style="color:${pend ? 'var(--warn)' : 'inherit'}">${pend}</b>${reps ? ` · گزارش باز: <b class="num" style="color:var(--sell)">${reps}</b>` : ''}</div></span>
-      <span class="btn btn-primary btn-sm">${pend ? 'بررسی ثبت‌نام‌ها' : 'ورود به مدیریت'} ←</span></a>`;
-  }
-  function bottomNav(r) {
-    const items = [['home', 'خانه', ICON.nHome], ['market', 'بازار', ICON.nMarket], ['new', 'ثبت', ICON.nNew],
-      ['rates', 'نرخ‌ها', ICON.nRates],
-      me() ? ['dashboard', 'داشبورد', ICON.nDash] : ['login', 'ورود', ICON.nDash]];
-    return `<nav class="bottom-nav">${items.map(([h, l, ic]) => `<a href="#${h}" class="${r === h || r.startsWith(h + '-') ? 'active' : ''}">${ic}<span>${l}</span></a>`).join('')}</nav>`;
-  }
-  // Animated number counters for elements with data-count
   function countUp() {
     document.querySelectorAll('[data-count]').forEach((el) => {
       const target = Number(el.dataset.count); if (!isFinite(target) || target === 0) return;
-      const t0 = performance.now(), dur = 1100;
-      const step = (t) => { const k = Math.min(1, (t - t0) / dur); const e = 1 - Math.pow(1 - k, 4); el.textContent = Math.round(target * e).toLocaleString('en-US'); if (k < 1) requestAnimationFrame(step); };
+      const t0 = performance.now(), dur = 1000;
+      const step = (t) => { const k = Math.min(1, (t - t0) / dur); el.textContent = Math.round(target * (1 - Math.pow(1 - k, 4))).toLocaleString('en-US'); if (k < 1) requestAnimationFrame(step); };
       el.textContent = '0'; requestAnimationFrame(step);
     });
   }
-  // Circular gradient ring (SVG)
-  let ringSeq = 0;
-  function ringSvg(frac, size, stroke, c1, c2) {
-    const id = 'rg' + (++ringSeq), r = (size - stroke) / 2, len = 2 * Math.PI * r;
-    const off = len * (1 - Math.max(0.02, Math.min(1, frac)));
-    return `<svg viewBox="0 0 ${size} ${size}" width="${size}" height="${size}"><defs><linearGradient id="${id}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${c1}"/><stop offset="1" stop-color="${c2}"/></linearGradient></defs>
-      <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="rgba(127,127,127,.12)" stroke-width="${stroke}"/>
-      <circle class="arc" style="--len:${len.toFixed(1)}" cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="url(#${id})" stroke-width="${stroke}" stroke-linecap="round" stroke-dasharray="${len.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}"/></svg>`;
-  }
+
   function pageFor(r) {
     let m;
     if (ADMIN_MODE) {
       if (!isAdmin()) return pageAdminLogin();
       if ((m = /^admin-review-(\d+)$/.exec(r))) return pageReview(Number(m[1]));
-      if ((m = /^admin(?:-(\w+))?$/.exec(r))) return pageAdmin(m[1] || 'overview');
+      if ((m = /^admin(?:-(\w+))?$/.exec(r))) return pageAdmin(m[1] || 'home');
       if ((m = /^order-(\d+)$/.exec(r))) return adminBack() + pageOrder(Number(m[1]));
       if ((m = /^deal-(\d+)$/.exec(r))) return adminBack() + pageDeal(Number(m[1]));
-      if ((m = /^user-(\d+)$/.exec(r))) return adminBack() + pageUser(Number(m[1]));
-      if (r === 'profile') return adminBack() + pageProfile();
-      return pageAdmin('overview');
+      return pageAdmin('home');
     }
     if (r === 'home') return pageHome();
     if (r === 'market') return pageMarket();
@@ -354,109 +408,121 @@
     if (r === 'new') return pageNew();
     if (r === 'login') return pageLogin();
     if (r === 'register') return pageRegister();
+    if (r === 'about') return pageAbout();
+    if (r === 'rules') return pageRules();
     if (r === 'profile') return needUser() || pageProfile();
     if ((m = /^dashboard(?:-(\w+))?$/.exec(r))) return needUser() || pageDashboard(m[1] || 'overview');
     if ((m = /^order-(\d+)$/.exec(r))) return needApproved() || pageOrder(Number(m[1]));
     if ((m = /^deal-(\d+)$/.exec(r))) return needUser() || pageDeal(Number(m[1]));
     if ((m = /^user-(\d+)$/.exec(r))) return needApproved() || pageUser(Number(m[1]));
-    return gate('صفحه پیدا نشد.');
+    return gate('صفحه مورد نظر یافت نشد.', '<a class="btn" href="#home">صفحه اصلی</a>');
   }
-  const gate = (msg, extra = '') => `<div class="auth-wrap card card-pad" style="text-align:center"><p>${msg}</p>${extra}</div>`;
-  const needUser = () => (me() ? null : gate('برای دیدن این صفحه وارد حساب خود شوید.', '<div class="row" style="justify-content:center"><a class="btn btn-primary" href="#login">ورود</a><a class="btn" href="#register">ثبت‌نام</a></div>'));
-  const needApproved = () => needUser() || (approved() ? null : gate(me().status === 'rejected' ? 'درخواست عضویت شما رد شده است. برای دیدن دلیل و ارسال دوباره به پروفایل بروید.' : 'حساب شما هنوز توسط مدیر تأیید نشده است. پس از تأیید، به تمام بخش‌های بازار دسترسی خواهید داشت.', '<a class="btn btn-primary" href="#profile">وضعیت حساب من</a>'));
+  const gate = (msg, extra = '') => `<div class="auth-wrap card card-pad" style="text-align:center"><p>${msg}</p><div class="row" style="justify-content:center">${extra}</div></div>`;
+  const needUser = () => (me() ? null : gate('برای مشاهده این صفحه وارد حساب خود شوید.', '<a class="btn btn-primary" href="#login">ورود</a><a class="btn" href="#register">عضویت</a>'));
+  const needApproved = () => needUser() || (approved() ? null : gate(me().status === 'rejected' ? 'درخواست عضویت شما رد شده است.' : 'حساب شما در انتظار تأیید مدیریت است.', '<a class="btn btn-primary" href="#profile">وضعیت حساب</a>'));
 
   /* =========================================================
      Orders table (shared)
      ========================================================= */
   function actionCell(o) {
     const m = me();
-    if (!m) return `<a class="btn btn-sm" href="#login">ورود برای معامله</a>`;
+    if (!m) return '<a class="btn btn-sm" href="#login">ورود</a>';
     if (o.userId === m.id) return `<a class="btn btn-sm" href="#order-${o.id}">مدیریت</a>`;
     if (o.status !== 'active') return orderBadge(o.status);
-    if (!approved()) return `<button class="btn btn-sm" disabled title="حساب شما هنوز تأیید نشده">منتظر تأیید</button>`;
+    if (!approved()) return '<button class="btn btn-sm" disabled>در انتظار تأیید</button>';
     return o.side === 'sell'
       ? `<button class="btn btn-buy btn-sm" data-act="request" data-id="${o.id}">خرید</button>`
-      : `<button class="btn btn-sell btn-sm" data-act="request" data-id="${o.id}">فروش به این خریدار</button>`;
+      : `<button class="btn btn-sell btn-sm" data-act="request" data-id="${o.id}">فروش</button>`;
   }
   function ordersTable(orders, opts = {}) {
-    if (!orders.length) return emptyBox(opts.empty || 'سفارشی پیدا نشد');
+    if (!orders.length) return emptyBox(opts.empty || 'سفارشی وجود ندارد.');
+    const click = approved() || ADMIN_MODE;
     return `<div class="table-wrap"><table class="data responsive"><thead><tr>
-      <th>دارایی</th><th>نوع</th><th>مقدار باقی‌مانده</th><th>نرخ</th><th>ارزش کل</th>${opts.noOwner ? '' : '<th>فروشنده / خریدار</th>'}<th>وضعیت</th><th></th></tr></thead><tbody>
+      <th>دارایی</th><th>نوع</th><th>مقدار</th><th>نرخ</th><th>ارزش</th>${opts.noOwner ? '' : '<th>ثبت‌کننده</th>'}<th>وضعیت</th><th></th></tr></thead><tbody>
       ${orders.map((o) => {
         const a = asset(o.assetId);
         const pct = o.amount ? Math.round(((o.amount - o.remaining) / o.amount) * 100) : 0;
-        return `<tr class="${approved() ? 'clickable' : ''}" data-href="${approved() ? '#order-' + o.id : ''}">
-          <td class="cell-main" data-l="دارایی">${assetChip(a, `#${o.id} · ${ago(o.createdAt)}`)}</td>
+        return `<tr class="${click ? 'clickable' : ''}" data-href="${click ? '#order-' + o.id : ''}">
+          <td class="cell-main" data-l="دارایی">${assetChip(a, `سفارش #${o.id} · ${ago(o.createdAt)}`)}</td>
           <td data-l="نوع">${sideBadge(o.side)}</td>
-          <td data-l="مقدار باقی‌مانده">${qty(o, o.remaining)}${o.remaining !== o.amount ? `<div class="muted small">از <span class="num">${fmt(o.amount)}</span> · ${pct}% واگذار</div>` : ''}</td>
+          <td data-l="مقدار">${qty(o, o.remaining)}${o.remaining !== o.amount ? `<div class="muted small">از <span class="num">${fmt(o.amount)}</span> · ${pct}٪ واگذار شده</div>` : ''}</td>
           <td data-l="نرخ"><span class="price num">${fmt(o.price)}</span> <span class="muted small">${esc(o.priceCurrency)}</span></td>
-          <td data-l="ارزش کل">${N(total(o, o.remaining), 2)} <span class="muted small">${esc(o.priceCurrency)}</span></td>
-          ${opts.noOwner ? '' : `<td data-l="فروشنده / خریدار">${o.userId ? nameLink(o.userId) : '<span class="muted">🔒 فقط برای اعضا</span>'}</td>`}
+          <td data-l="ارزش">${N(total(o, o.remaining), 2)} <span class="muted small">${esc(o.priceCurrency)}</span></td>
+          ${opts.noOwner ? '' : `<td data-l="ثبت‌کننده">${o.userId ? nameLink(o.userId) : '<span class="muted">مخصوص اعضا</span>'}</td>`}
           <td data-l="وضعیت">${orderBadge(o.status)}</td>
-          <td class="cell-act" data-l="">${actionCell(o)}</td></tr>`;
+          <td class="cell-act">${ADMIN_MODE ? '' : actionCell(o)}</td></tr>`;
       }).join('')}</tbody></table></div>`;
   }
-
-  function bookSummary(orders) {
+  function bookSummary() {
     const out = [];
     for (const a of view.assets.filter((x) => x.active)) {
-      const os = orders.filter((o) => o.assetId === a.id && o.status === 'active');
+      const os = view.orders.filter((o) => o.assetId === a.id && o.status === 'active');
       if (!os.length) continue;
       const sells = os.filter((o) => o.side === 'sell'), buys = os.filter((o) => o.side === 'buy');
-      const ask = sells.length ? Math.min(...sells.map((o) => o.price)) : null;
-      const bid = buys.length ? Math.max(...buys.map((o) => o.price)) : null;
-      out.push({ a, ask, bid, n: os.length, sells: sells.length, buys: buys.length });
+      out.push({ a, ask: sells.length ? Math.min(...sells.map((o) => o.price)) : null, bid: buys.length ? Math.max(...buys.map((o) => o.price)) : null, n: os.length });
     }
     return out;
   }
 
   /* =========================================================
-     Pages
+     Public pages
      ========================================================= */
+  function officialBoard({ compact = false } = {}) {
+    const rows = view.rates.map((r) => ({ r, a: asset(r.assetId) })).filter((x) => x.a.active !== false);
+    const last = rows.reduce((m, x) => Math.max(m, x.r.updatedAt || 0), 0);
+    return `<section class="card official glow">
+      <div class="official-head">
+        <div><span class="seal">${ICON.seal}</span></div>
+        <div style="flex:1"><h2>نرخ رسمی بازار</h2><div class="muted small">${longDate.format(new Date())}</div></div>
+        <div class="official-meta"><span class="badge ok">تأیید شده توسط مدیریت</span><div class="muted small">آخرین به‌روزرسانی: ${last ? timeFmt.format(new Date(last)) : '—'}</div></div>
+      </div>
+      <div class="table-wrap"><table class="data responsive official-table"><thead><tr><th>ارز / دارایی</th><th>خرید</th><th>فروش</th><th>تغییر</th>${compact ? '' : '<th>واحد</th><th>زمان</th>'}</tr></thead><tbody>
+        ${rows.map(({ r, a }) => {
+          const mid = (r.buy + r.sell) / 2, ch = r.prevMid ? ((mid - r.prevMid) / r.prevMid) * 100 : 0;
+          return `<tr class="clickable" data-act="rate-open" data-id="${a.id}"><td class="cell-main">${assetChip(a)}</td>
+            <td data-l="خرید"><b class="num price" style="color:var(--buy)">${fmt(r.buy)}</b></td>
+            <td data-l="فروش"><b class="num price" style="color:var(--sell)">${fmt(r.sell)}</b></td>
+            <td data-l="تغییر"><span class="num chg ${ch >= 0 ? 'up' : 'down'}">${ch >= 0 ? '▲' : '▼'} ${Math.abs(ch).toFixed(2)}%</span></td>
+            ${compact ? '' : `<td data-l="واحد" class="small">${esc(r.currency)} برای هر ${esc(a.unit)}</td><td data-l="زمان" class="small muted">${ago(r.updatedAt)}</td>`}</tr>`;
+        }).join('') || `<tr><td colspan="6">${emptyBox('نرخ رسمی ثبت نشده است.')}</td></tr>`}
+      </tbody></table></div>
+      <p class="muted small" style="margin:6px 22px 18px">نرخ رسمی توسط مدیریت سرای شهزاده تعیین و منتشر می‌شود. نرخ پیشنهادهای اعضا در بخش «بازار» جداگانه نمایش داده می‌شود.</p>
+    </section>`;
+  }
+
   function pageHome() {
     const active = view.orders.filter((o) => o.status === 'active').sort((a, b) => b.createdAt - a.createdAt);
-    const book = bookSummary(view.orders);
+    const st = view.stats, n = st.activeOrders || 0;
+    const mx = Math.max(st.members, st.activeDeals, st.completedDeals, 1);
+    const mini = (v, c1, c2, label, color) => `<div class="ring-item"><span class="node" style="color:${color}"></span><div class="mini">${ringSvg(0.15 + 0.8 * (v / mx), 84, 5, c1, c2)}<b class="num" data-count="${v}">${v}</b></div><div class="lbl" style="color:${color}">${label}</div></div>`;
     return `
-    <section class="hero">
+    ${me() && !approved() ? statusHero(me()) : ''}
+    ${officialBoard({ compact: true })}
+    <section class="hero" style="margin-top:26px">
       <div>
-        <span class="live"><i></i><b>زنده</b> بازار دیجیتال صرافان، زرگران و تاجران</span>
-        <h1>معاملات سرای شهزاده،<br><span class="accent">بدون کانال تلگرام و واتس‌اپ</span></h1>
-        <p>پیشنهاد خرید یا فروش خود را ثبت کنید، پیشنهادهای دیگران را ببینید و با یک کلیک درخواست معامله بفرستید. طرف مقابل تأیید می‌کند و ارتباط مستقیم برقرار می‌شود.</p>
+        <h1 style="font-size:24px">وضعیت بازار</h1>
+        <p>پیشنهادهای خرید و فروش اعضای تأییدشده سرای شهزاده. برای ارسال درخواست معامله، عضویت و تأیید مدیریت لازم است.</p>
         <div class="row">
-          <a class="btn btn-primary btn-lg" href="#market">ورود به بازار</a>
-          <a class="btn btn-lg" href="${approved() ? '#new' : me() ? '#profile' : '#register'}">${me() ? 'ثبت سفارش جدید' : 'عضویت رایگان'}</a>
-        </div>
-        <div class="book-mini">
-          <table><thead><tr><th>دارایی</th><th>بهترین خرید</th><th>بهترین فروش</th></tr></thead><tbody>
-          ${book.length ? book.slice(0, 5).map((b) => `<tr><td>${esc(b.a.name)}</td><td class="b num">${b.bid != null ? fmt(b.bid) : '—'}</td><td class="s num">${b.ask != null ? fmt(b.ask) : '—'}</td></tr>`).join('') : '<tr><td colspan="3" class="muted" style="text-align:center">هنوز پیشنهادی ثبت نشده</td></tr>'}
-          </tbody></table>
+          <a class="btn btn-primary btn-lg" href="#market">مشاهده بازار</a>
+          <a class="btn btn-lg" href="${approved() ? '#new' : me() ? '#profile' : '#register'}">${approved() ? 'ثبت سفارش' : me() ? 'وضعیت حساب' : 'درخواست عضویت'}</a>
         </div>
       </div>
-      ${(() => {
-        const st = view.stats, n = st.activeOrders || 0;
-        const sellFrac = n ? st.sellOrders / n : 0;
-        const mx = Math.max(st.members, st.activeDeals, st.completedDeals, 1);
-        const mini = (v, c1, c2, label, sub, color) => `<div class="ring-item"><span class="node" style="color:${color}"></span><div class="mini">${ringSvg(0.15 + 0.8 * (v / mx), 84, 5, c1, c2)}<b class="num" data-count="${v}">${v}</b></div><div class="lbl" style="color:${color}">${label}<small>${sub}</small></div></div>`;
-        return `<div class="rings">
-          <div class="ring-big glow"><span class="halo"></span>${ringSvg(sellFrac || 0.02, 250, 14, '#22d3ee', '#3b82f6')}
-            <div class="center"><b class="num" data-count="${n}">${n}</b><span>پیشنهاد فعال در بازار</span><em>${st.sellOrders} فروش · ${st.buyOrders} خرید</em></div></div>
-          <div class="ring-list">
-            ${mini(st.members, '#3ee09a', '#12a868', 'عضو تأییدشده', 'صراف، زرگر، تاجر', 'var(--buy)')}
-            ${mini(st.activeDeals, '#8b7cf6', '#3b82f6', 'در حال انجام', 'معاملات تأییدشده', '#8b9cff')}
-            ${mini(st.completedDeals, '#ffb34d', '#ff6b7a', 'تکمیل‌شده', 'تأیید دوطرفه', 'var(--sell)')}
-          </div></div>`;
-      })()}
+      <div class="rings">
+        <div class="ring-big glow"><span class="halo"></span>${ringSvg(n ? st.sellOrders / n : 0.02, 250, 14, '#22d3ee', '#3b82f6')}
+          <div class="center"><b class="num" data-count="${n}">${n}</b><span>پیشنهاد فعال</span><em>${st.sellOrders} فروش · ${st.buyOrders} خرید</em></div></div>
+        <div class="ring-list">
+          ${mini(st.members, '#3ee09a', '#12a868', 'عضو تأییدشده', 'var(--buy)')}
+          ${mini(st.activeDeals, '#8b7cf6', '#3b82f6', 'معامله در حال اجرا', '#8b9cff')}
+          ${mini(st.completedDeals, '#ffb34d', '#ff6b7a', 'معامله تکمیل‌شده', 'var(--sell)')}
+        </div>
+      </div>
     </section>
-
-    <div class="page-head" style="margin-top:28px"><div><h1>آخرین پیشنهادهای بازار</h1><p>پیشنهادهای فعال اعضای تأییدشده</p></div><a class="btn" href="#market">مشاهده همه ←</a></div>
-    <div class="card">${ordersTable(active.slice(0, 6), { empty: 'هنوز سفارشی ثبت نشده است' })}</div>
-
-    <div class="grid g3" style="margin-top:24px">
-      ${[['۱', 'عضویت و تأیید', 'با نام، شماره تماس و نام صرافی ثبت‌نام کنید. مدیر سیستم حساب شما را تأیید می‌کند.'],
-         ['۲', 'ثبت سفارش', 'مقدار و نرخ پیشنهادی خود را برای خرید یا فروش هر ارز، طلا یا نقره ثبت کنید.'],
-         ['۳', 'درخواست و تأیید', 'دیگران درخواست می‌فرستند؛ شما کامل یا جزئی تأیید می‌کنید و ارتباط مستقیم برقرار می‌شود.']]
-        .map(([n, t, d]) => `<div class="card card-pad"><span class="asset-ico" style="margin-bottom:10px">${n}</span><h3>${t}</h3><p class="muted" style="margin:0">${d}</p></div>`).join('')}
-    </div>`;
+    ${pageHead('آخرین پیشنهادها', '', '<a class="btn" href="#market">همه پیشنهادها</a>').replace('class="page-head"', 'class="page-head" style="margin-top:30px"')}
+    <div class="card">${ordersTable(active.slice(0, 6), { empty: 'پیشنهاد فعالی ثبت نشده است.' })}</div>
+    <section class="card card-pad" style="margin-top:24px">
+      <h2>روند معامله در سامانه</h2>
+      ${stepper(['عضویت و تأیید مدیریت', 'ثبت سفارش خرید یا فروش', 'ارسال درخواست و تأیید صاحب سفارش', 'تماس مستقیم، تحویل و تسویه', 'تأیید تکمیل توسط هر دو طرف'], -1).replace('card card-pad stepper-card', 'stepper-plain')}
+    </section>`;
   }
 
   function filteredOrders() {
@@ -473,35 +539,32 @@
   }
   function pageMarket() {
     const f = ui.filters;
-    const book = bookSummary(view.orders);
-    return `
-    <div class="page-head"><div><h1>بازار معاملات</h1><p>تمام پیشنهادهای فعال خرید و فروش — برای مقایسه نرخ‌ها، فیلتر کنید.</p></div>
-      ${approved() ? '<a class="btn btn-primary" href="#new">+ ثبت سفارش</a>' : ''}</div>
-    ${!me() ? '<div class="notice" style="margin-bottom:16px">نام معامله‌گران و امکان ارسال درخواست فقط برای اعضای تأییدشده نمایش داده می‌شود. <a href="#register">عضو شوید</a> یا <a href="#login">وارد شوید</a>.</div>' : ''}
-    ${me() && !approved() ? '<div class="notice warn" style="margin-bottom:16px">حساب شما منتظر تأیید مدیر است. پس از تأیید می‌توانید درخواست خرید و فروش بفرستید.</div>' : ''}
-    ${book.length ? `<div class="grid g4" style="margin-bottom:18px">${book.map((b) => `
+    const book = bookSummary();
+    return `${pageHead('بازار', 'پیشنهادهای فعال خرید و فروش اعضا', approved() ? '<a class="btn btn-primary" href="#new">ثبت سفارش</a>' : '')}
+    ${!me() ? '<div class="notice" style="margin-bottom:18px">نام ثبت‌کننده و ارسال درخواست فقط برای اعضای تأییدشده فعال است.</div>' : ''}
+    ${me() && !approved() ? '<div class="notice warn" style="margin-bottom:18px">حساب شما در انتظار تأیید مدیریت است.</div>' : ''}
+    ${book.length ? `<div class="grid g4" style="margin-bottom:22px">${book.map((b) => `
       <div class="card tile sheen" style="cursor:pointer" data-act="filter-asset" data-id="${b.a.id}">
-        <div class="row">${assetChip(b.a)}<span class="spacer"></span><span class="badge">${b.n} پیشنهاد</span></div>
+        <div class="row">${assetChip(b.a)}<span class="spacer"></span><span class="badge">${b.n}</span></div>
         <div class="grid g2" style="gap:8px;margin-top:10px">
-          <div><span class="small muted">بهترین خرید</span><div class="num" style="color:var(--buy);font-weight:800">${b.bid != null ? fmt(b.bid) : '—'}</div></div>
-          <div><span class="small muted">بهترین فروش</span><div class="num" style="color:var(--sell);font-weight:800">${b.ask != null ? fmt(b.ask) : '—'}</div></div>
+          <div><span class="small muted">بالاترین خرید</span><div class="num" style="color:var(--buy);font-weight:800">${b.bid != null ? fmt(b.bid) : '—'}</div></div>
+          <div><span class="small muted">پایین‌ترین فروش</span><div class="num" style="color:var(--sell);font-weight:800">${b.ask != null ? fmt(b.ask) : '—'}</div></div>
         </div></div>`).join('')}</div>` : ''}
     <div class="card">
       <div class="filters">
-        <select class="input" data-filter="asset"><option value="">همه دارایی‌ها</option>${view.assets.filter((a) => a.active).map((a) => `<option value="${a.id}" ${String(a.id) === f.asset ? 'selected' : ''}>${esc(a.name)} (${esc(a.code)})</option>`).join('')}</select>
-        <select class="input" data-filter="side"><option value="">خرید و فروش</option><option value="sell" ${f.side === 'sell' ? 'selected' : ''}>فقط فروش</option><option value="buy" ${f.side === 'buy' ? 'selected' : ''}>فقط خرید</option></select>
-        <input class="input num" data-filter="min" placeholder="کمترین نرخ" inputmode="decimal" value="${esc(f.min)}">
-        <input class="input num" data-filter="max" placeholder="بیشترین نرخ" inputmode="decimal" value="${esc(f.max)}">
+        <select class="input" data-filter="asset"><option value="">همه دارایی‌ها</option>${view.assets.filter((a) => a.active).map((a) => `<option value="${a.id}" ${String(a.id) === f.asset ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select>
+        <select class="input" data-filter="side"><option value="">خرید و فروش</option><option value="sell" ${f.side === 'sell' ? 'selected' : ''}>فروش</option><option value="buy" ${f.side === 'buy' ? 'selected' : ''}>خرید</option></select>
+        <input class="input num" data-filter="min" placeholder="حداقل نرخ" inputmode="decimal" value="${esc(f.min)}">
+        <input class="input num" data-filter="max" placeholder="حداکثر نرخ" inputmode="decimal" value="${esc(f.max)}">
         <input class="input num" data-filter="minAmount" placeholder="حداقل مقدار" inputmode="decimal" value="${esc(f.minAmount)}">
-        <input class="input" data-filter="q" placeholder="نام صرافی…" value="${esc(f.q)}" ${approved() ? '' : 'disabled'}>
+        <input class="input" data-filter="q" placeholder="نام صرافی" value="${esc(f.q)}" ${approved() ? '' : 'disabled'}>
       </div>
-      <div class="row" style="padding:10px 14px;border-bottom:1px solid var(--line)">
+      <div class="row" style="padding:4px 18px 8px">
         <span class="muted small" id="market-count"></span><span class="spacer"></span>
-        <span class="small muted">مرتب‌سازی:</span>
-        <select class="input" style="width:auto;padding:5px 10px" data-filter="sort">
-          ${[['new', 'جدیدترین'], ['pa', 'نرخ: کم به زیاد'], ['pd', 'نرخ: زیاد به کم'], ['amt', 'بیشترین مقدار']].map(([v, l]) => `<option value="${v}" ${f.sort === v ? 'selected' : ''}>${l}</option>`).join('')}
+        <select class="input" style="width:auto;padding:6px 34px 6px 14px" data-filter="sort">
+          ${[['new', 'جدیدترین'], ['pa', 'کمترین نرخ'], ['pd', 'بیشترین نرخ'], ['amt', 'بیشترین مقدار']].map(([v, l]) => `<option value="${v}" ${f.sort === v ? 'selected' : ''}>${l}</option>`).join('')}
         </select>
-        ${Object.entries(f).some(([k, v]) => k !== 'sort' && v) ? '<button class="btn btn-ghost btn-sm" data-act="clear-filters">پاک‌کردن فیلترها</button>' : ''}
+        ${Object.entries(f).some(([k, v]) => k !== 'sort' && v) ? '<button class="btn btn-ghost btn-sm" data-act="clear-filters">حذف فیلتر</button>' : ''}
       </div>
       <div id="market-table"></div>
     </div>`;
@@ -509,68 +572,65 @@
   function renderMarketTable() {
     const el = document.getElementById('market-table'); if (!el) return;
     const os = filteredOrders();
-    el.innerHTML = ordersTable(os, { empty: 'با این فیلترها پیشنهادی پیدا نشد' });
-    const c = document.getElementById('market-count'); if (c) c.textContent = `${os.length} پیشنهاد فعال`;
+    el.innerHTML = ordersTable(os, { empty: 'پیشنهادی مطابق فیلتر یافت نشد.' });
+    const c = document.getElementById('market-count'); if (c) c.textContent = `${os.length} پیشنهاد`;
   }
 
-  /* ---------- request modal ---------- */
   function openRequest(orderId) {
     const o = orderOf(orderId); if (!o) return;
     const a = asset(o.assetId); const owner = user(o.userId);
     const verb = o.side === 'sell' ? 'خرید' : 'فروش';
-    modal(`درخواست ${verb} — ${esc(a.name)}`, `
+    modal(`درخواست ${verb} ${esc(a.name)}`, `
       <form data-form="request" data-id="${o.id}" class="stack">
         <dl class="kv"><dt>${o.side === 'sell' ? 'فروشنده' : 'خریدار'}</dt><dd>${esc(owner ? owner.company : '')}</dd>
           <dt>نرخ</dt><dd class="num">${fmt(o.price)} ${esc(o.priceCurrency)}</dd>
-          <dt>مقدار باقی‌مانده</dt><dd><span class="num">${fmt(o.remaining)}</span> ${esc(o.unit)}</dd>
+          <dt>مقدار موجود</dt><dd><span class="num">${fmt(o.remaining)}</span> ${esc(o.unit)}</dd>
           ${o.minAmount ? `<dt>حداقل مقدار</dt><dd class="num">${fmt(o.minAmount)}</dd>` : ''}
           ${o.note ? `<dt>توضیحات</dt><dd>${esc(o.note)}</dd>` : ''}</dl>
-        <label class="field"><span>مقدار موردنظر شما (${esc(o.unit)})</span>
+        <label class="field"><span>مقدار درخواستی (${esc(o.unit)})</span>
           <input class="input num" name="amount" inputmode="decimal" value="${o.remaining}" data-calc="${o.price}" required></label>
-        <div class="row small">${[0.25, 0.5, 1].map((p) => `<button type="button" class="btn btn-sm" data-act="fill-amt" data-v="${+(o.remaining * p).toFixed(6)}">${p === 1 ? 'تمام مقدار' : p * 100 + '٪'}</button>`).join('')}</div>
-        <div class="total-box"><span>ارزش تقریبی</span><b class="num" data-total>${fmt(total(o, o.remaining), 2)} ${esc(o.priceCurrency)}</b></div>
-        <label class="field"><span>پیام برای ${o.side === 'sell' ? 'فروشنده' : 'خریدار'} (اختیاری)</span><textarea class="input" name="note" placeholder="مثلاً زمان و محل تحویل"></textarea></label>
-        <button class="btn ${o.side === 'sell' ? 'btn-buy' : 'btn-sell'} btn-block btn-lg">ارسال درخواست ${verb}</button>
-        <p class="muted small" style="margin:0">پس از تأیید ${o.side === 'sell' ? 'فروشنده' : 'خریدار'}، اطلاعات تماس دو طرف نمایش داده می‌شود.</p>
+        <div class="row small">${[0.25, 0.5, 1].map((p) => `<button type="button" class="btn btn-sm" data-act="fill-amt" data-v="${+(o.remaining * p).toFixed(6)}">${p === 1 ? 'کل مقدار' : p * 100 + '٪'}</button>`).join('')}</div>
+        <div class="total-box"><span>ارزش معامله</span><b class="num" data-total>${fmt(total(o, o.remaining), 2)} ${esc(o.priceCurrency)}</b></div>
+        <label class="field"><span>پیام (اختیاری)</span><textarea class="input" name="note" placeholder="زمان و محل تحویل"></textarea></label>
+        <button class="btn ${o.side === 'sell' ? 'btn-buy' : 'btn-sell'} btn-block btn-lg">ارسال درخواست</button>
+        <p class="muted small" style="margin:0">پس از تأیید صاحب سفارش، اطلاعات تماس دو طرف در صفحه معامله نمایش داده می‌شود.</p>
       </form>`);
   }
 
-  /* ---------- new order ---------- */
   function pageNew() {
-    const gateMsg = needApproved(); if (gateMsg) return gateMsg;
+    const g = needApproved(); if (g) return g;
     const assets = view.assets.filter((a) => a.active);
     const a0 = assets[0];
-    return `
-    <div class="page-head"><div><h1>ثبت سفارش جدید</h1><p>پیشنهاد خرید یا فروش خود را برای اعضای بازار منتشر کنید.</p></div></div>
+    return `${pageHead('ثبت سفارش', 'سفارش ثبت‌شده برای همه اعضای تأییدشده نمایش داده می‌شود.')}
     <div class="split">
       <form class="card card-pad stack" data-form="order">
         <div class="side-toggle">
-          <button type="button" class="sell ${ui.side === 'sell' ? 'on' : ''}" data-act="side" data-v="sell">فروش (Sell)</button>
-          <button type="button" class="buy ${ui.side === 'buy' ? 'on' : ''}" data-act="side" data-v="buy">خرید (Buy)</button>
+          <button type="button" class="sell ${ui.side === 'sell' ? 'on' : ''}" data-act="side" data-v="sell">فروش</button>
+          <button type="button" class="buy ${ui.side === 'buy' ? 'on' : ''}" data-act="side" data-v="buy">خرید</button>
         </div>
-        <label class="field"><span>نوع دارایی</span>
+        <label class="field"><span>دارایی</span>
           <select class="input" name="assetId" data-change="asset-pick">${assets.map((a) => `<option value="${a.id}" data-unit="${esc(a.unit)}" data-cur="${esc(a.priceCurrency)}">${esc(a.name)} (${esc(a.code)})</option>`).join('')}</select></label>
         <div class="grid g2">
-          <label class="field"><span>مقدار</span><input class="input num" name="amount" inputmode="decimal" placeholder="40,000" required></label>
+          <label class="field"><span>مقدار</span><input class="input num" name="amount" inputmode="decimal" required></label>
           <label class="field"><span>واحد مقدار</span><input class="input" name="unit" value="${esc(a0 ? a0.unit : '')}" required></label>
         </div>
         <div class="grid g2">
-          <label class="field"><span>نرخ پیشنهادی (قیمت هر واحد)</span><input class="input num" name="price" inputmode="decimal" placeholder="65.30" required></label>
+          <label class="field"><span>نرخ هر واحد</span><input class="input num" name="price" inputmode="decimal" required></label>
           <label class="field"><span>واحد قیمت</span><input class="input" name="priceCurrency" value="${esc(a0 ? a0.priceCurrency : '')}" required></label>
         </div>
-        <div class="total-box"><span>مجموع ارزش معامله</span><b class="num" data-order-total>—</b></div>
+        <div class="total-box"><span>ارزش کل</span><b class="num" data-order-total>—</b></div>
+        <div id="rate-warn"></div>
         <div class="grid g2">
-          <label class="field"><span>حداقل مقدار هر درخواست (اختیاری)</span><input class="input num" name="minAmount" inputmode="decimal" placeholder="مثلاً 5,000"></label>
-          <label class="field"><span>مدت اعتبار سفارش</span>
-            <select class="input" name="validHours"><option value="2">۲ ساعت</option><option value="6">۶ ساعت</option><option value="24" selected>۱ روز</option><option value="72">۳ روز</option><option value="168">۱ هفته</option><option value="0">تا زمان بستن دستی</option></select></label>
+          <label class="field"><span>حداقل مقدار هر درخواست</span><input class="input num" name="minAmount" inputmode="decimal" placeholder="اختیاری"></label>
+          <label class="field"><span>مدت اعتبار</span>
+            <select class="input" name="validHours"><option value="2">۲ ساعت</option><option value="6">۶ ساعت</option><option value="24" selected>۲۴ ساعت</option><option value="72">۳ روز</option><option value="168">۷ روز</option><option value="0">تا بستن دستی</option></select></label>
         </div>
-        <label class="field"><span>توضیحات (اختیاری)</span><textarea class="input" name="note" placeholder="مثلاً: تحویل نقد در سرای شهزاده، دفتر شماره ۱۲"></textarea></label>
-        <button class="btn btn-primary btn-lg btn-block">ثبت و انتشار سفارش</button>
+        <label class="field"><span>توضیحات</span><textarea class="input" name="note" placeholder="محل و شرایط تحویل (اختیاری)"></textarea></label>
+        <button class="btn btn-primary btn-lg btn-block">ثبت سفارش</button>
       </form>
       <aside class="stack">
-        <div class="card card-pad"><h3>نرخ عمومی بازار</h3><div id="ref-rate" class="muted small">یک دارایی انتخاب کنید</div></div>
-        <div class="card card-pad"><h3>پیشنهادهای رقیب</h3><div id="ref-book" class="small"></div></div>
-        <div class="notice small">این سایت فقط بستر معرفی پیشنهاد و ارتباط خریدار و فروشنده است؛ انتقال پول و تحویل دارایی بیرون از سایت انجام می‌شود.</div>
+        <div class="card card-pad"><h3>نرخ رسمی</h3><div id="ref-rate" class="muted small"></div></div>
+        <div class="card card-pad"><h3>پیشنهادهای فعال همین دارایی</h3><div id="ref-book" class="small"></div></div>
       </aside>
     </div>`;
   }
@@ -579,64 +639,69 @@
     const aid = Number(form.assetId.value);
     const rt = view.rates.find((r) => r.assetId === aid);
     const rr = document.getElementById('ref-rate');
-    if (rr) rr.innerHTML = rt ? `<div class="grid g2" style="gap:8px"><div>خرید<div class="num price" style="color:var(--buy)">${fmt(rt.buy)}</div></div><div>فروش<div class="num price" style="color:var(--sell)">${fmt(rt.sell)}</div></div></div><div class="muted small" style="margin-top:6px">به‌روزرسانی: ${ago(rt.updatedAt)}</div>` : 'نرخ عمومی ثبت نشده';
+    if (rr) rr.innerHTML = rt ? `<div class="grid g2" style="gap:8px"><div>خرید<div class="num price" style="color:var(--buy)">${fmt(rt.buy)}</div></div><div>فروش<div class="num price" style="color:var(--sell)">${fmt(rt.sell)}</div></div></div><div class="muted small" style="margin-top:6px">${ago(rt.updatedAt)}</div>` : 'نرخ رسمی ثبت نشده است.';
     const os = view.orders.filter((o) => o.status === 'active' && o.assetId === aid);
     const sells = os.filter((o) => o.side === 'sell').sort((a, b) => a.price - b.price).slice(0, 4);
     const buys = os.filter((o) => o.side === 'buy').sort((a, b) => b.price - a.price).slice(0, 4);
-    const line = (o) => `<div class="row" style="justify-content:space-between;padding:4px 0;border-bottom:1px dashed var(--line)"><span>${sideBadge(o.side)} <span class="num">${fmt(o.remaining)}</span></span><b class="num">${fmt(o.price)}</b></div>`;
+    const line = (o) => `<div class="row" style="justify-content:space-between;padding:5px 0;border-bottom:1px dashed var(--line)"><span>${sideBadge(o.side)} <span class="num">${fmt(o.remaining)}</span></span><b class="num">${fmt(o.price)}</b></div>`;
     const rb = document.getElementById('ref-book');
-    if (rb) rb.innerHTML = os.length ? sells.map(line).join('') + buys.map(line).join('') : '<span class="muted">برای این دارایی پیشنهاد فعالی نیست</span>';
+    if (rb) rb.innerHTML = os.length ? sells.map(line).join('') + buys.map(line).join('') : '<span class="muted">پیشنهاد فعالی وجود ندارد.</span>';
     const amt = Number(String(form.amount.value).replace(/,/g, '')), pr = Number(String(form.price.value).replace(/,/g, ''));
     const t = document.querySelector('[data-order-total]');
     if (t) t.textContent = amt > 0 && pr > 0 ? `${fmt(amt * pr, 2)} ${form.priceCurrency.value}` : '—';
+    const w = document.getElementById('rate-warn');
+    if (w) {
+      const mid = rt ? (rt.buy + rt.sell) / 2 : 0;
+      w.innerHTML = rt && pr > 0 && Math.abs(pr - mid) / mid > 0.05 ? `<div class="notice warn small">نرخ واردشده ${Math.round((Math.abs(pr - mid) / mid) * 100)}٪ با نرخ رسمی فاصله دارد. ارقام را بررسی کنید.</div>` : '';
+    }
   }
 
-  /* ---------- order detail ---------- */
+  /* ---------- order page ---------- */
   function pageOrder(id) {
     const o = orderOf(id);
-    if (!o) return gate('این سفارش پیدا نشد یا دیگر در دسترس نیست.', '<a class="btn" href="#market">بازگشت به بازار</a>');
+    if (!o) return gate('این سفارش یافت نشد یا در دسترس نیست.', '<a class="btn" href="#market">بازار</a>');
     const a = asset(o.assetId);
-    const mine = o.userId === me().id;
+    const mine = me() && o.userId === me().id;
     const deals = view.deals.filter((d) => d.orderId === o.id);
-    const accepted = deals.filter((d) => ['accepted', 'completed'].includes(d.status)).reduce((s, d) => s + d.acceptedAmount, 0);
     const pct = o.amount ? Math.round(((o.amount - o.remaining) / o.amount) * 100) : 0;
-    const order = { pending: 0, accepted: 1, completed: 2, rejected: 3, cancelled: 4 };
-    const sorted = deals.slice().sort((x, y) => order[x.status] - order[y.status] || y.createdAt - x.createdAt);
-    const competitors = view.orders.filter((x) => x.status === 'active' && x.assetId === o.assetId && x.id !== o.id)
+    const rank = { pending: 0, accepted: 1, completed: 2, rejected: 3, cancelled: 4 };
+    const sorted = deals.slice().sort((x, y) => rank[x.status] - rank[y.status] || y.createdAt - x.createdAt);
+    const pendingN = deals.filter((d) => d.status === 'pending').length;
+    const others = view.orders.filter((x) => x.status === 'active' && x.assetId === o.assetId && x.id !== o.id)
       .sort((x, y) => (x.side === y.side ? (x.side === 'sell' ? x.price - y.price : y.price - x.price) : x.side === o.side ? -1 : 1)).slice(0, 8);
-    return `
-    <div class="page-head"><div><h1>${o.side === 'sell' ? 'فروش' : 'خرید'} ${esc(a.name)} <span class="muted num" style="font-weight:400">#${o.id}</span></h1>
-      <p>${orderBadge(o.status)} · ثبت ${ago(o.createdAt)} · ${left(o.expiresAt)}</p></div>
-      <div class="row">${mine && ['active', 'filled'].includes(o.status) ? `<button class="btn" data-act="close-order" data-id="${o.id}">بستن سفارش</button>` : ''}
-      ${!mine && o.status === 'active' ? actionCell(o).replace('btn-sm', 'btn-lg') : ''}</div></div>
+    const myReq = !mine && me() ? deals.find((d) => d.requesterId === me().id && d.status === 'pending') : null;
+    const guide = mine
+      ? (pendingN ? `<b>اقدام شما:</b> ${pendingN} درخواست در انتظار پاسخ است. هر درخواست را تأیید (کامل یا جزئی) یا رد کنید.` : o.status === 'active' ? 'سفارش شما فعال است. درخواست‌های جدید در همین صفحه و در اعلان‌ها نمایش داده می‌شود.' : `این سفارش ${E.ORDER_STATUS[o.status]} است.`)
+      : myReq ? 'درخواست شما ارسال شده و در انتظار پاسخ صاحب سفارش است.' : o.status === 'active' ? `برای ${o.side === 'sell' ? 'خرید' : 'فروش'}، دکمه درخواست را بزنید و مقدار را وارد کنید.` : '';
+    return `${pageHead(`${o.side === 'sell' ? 'فروش' : 'خرید'} ${esc(a.name)} <span class="muted num" style="font-weight:400">#${o.id}</span>`, `${orderBadge(o.status)} · ثبت ${ago(o.createdAt)} · اعتبار: ${left(o.expiresAt)}`,
+      `${(mine || ADMIN_MODE) && ['active', 'filled'].includes(o.status) ? `<button class="btn" data-act="close-order" data-id="${o.id}">بستن سفارش</button>` : ''}${!mine && !ADMIN_MODE && o.status === 'active' && !myReq ? actionCell(o).replace('btn-sm', 'btn-lg') : ''}`)}
+    ${guide ? `<div class="notice" style="margin-bottom:18px">${guide}</div>` : ''}
     <div class="split">
       <div class="stack">
         <div class="card card-pad">
           <div class="grid g4">
             <div><span class="muted small">مقدار کل</span><div class="price">${qty(o)}</div></div>
-            <div><span class="muted small">باقی‌مانده</span><div class="price" style="color:var(--blue)">${qty(o, o.remaining)}</div></div>
+            <div><span class="muted small">باقی‌مانده</span><div class="price" style="color:var(--blue-2)">${qty(o, o.remaining)}</div></div>
             <div><span class="muted small">نرخ</span><div class="price"><span class="num">${fmt(o.price)}</span> <span class="small muted">${esc(o.priceCurrency)}</span></div></div>
             <div><span class="muted small">ارزش کل</span><div class="price"><span class="num">${fmt(total(o), 2)}</span> <span class="small muted">${esc(o.priceCurrency)}</span></div></div>
           </div>
-          <div style="margin-top:16px"><div class="row small muted" style="justify-content:space-between"><span>واگذارشده: <span class="num">${fmt(o.amount - o.remaining)}</span> ${esc(o.unit)}</span><span class="num">${pct}%</span></div><div class="progress"><i style="width:${pct}%"></i></div></div>
+          <div style="margin-top:16px"><div class="row small muted" style="justify-content:space-between"><span>واگذار شده: <span class="num">${fmt(o.amount - o.remaining)}</span> ${esc(o.unit)}</span><span class="num">${pct}%</span></div><div class="progress"><i style="width:${pct}%"></i></div></div>
           <dl class="kv" style="margin-top:16px">
             <dt>${o.side === 'sell' ? 'فروشنده' : 'خریدار'}</dt><dd>${nameLink(o.userId)}</dd>
-            ${o.minAmount ? `<dt>حداقل مقدار هر درخواست</dt><dd class="num">${fmt(o.minAmount)} ${esc(o.unit)}</dd>` : ''}
+            ${o.minAmount ? `<dt>حداقل مقدار درخواست</dt><dd class="num">${fmt(o.minAmount)} ${esc(o.unit)}</dd>` : ''}
             <dt>زمان ثبت</dt><dd>${fmtDate(o.createdAt)}</dd>
-            <dt>اعتبار</dt><dd>${o.expiresAt ? fmtDate(o.expiresAt) : 'تا زمان بستن دستی'}</dd>
+            <dt>پایان اعتبار</dt><dd>${o.expiresAt ? fmtDate(o.expiresAt) : 'تا بستن دستی'}</dd>
             ${o.note ? `<dt>توضیحات</dt><dd>${esc(o.note)}</dd>` : ''}
           </dl>
         </div>
         <div class="card card-pad">
-          <div class="row" style="margin-bottom:12px"><h2 style="margin:0">${mine ? 'درخواست‌های دریافتی' : 'درخواست‌های شما برای این سفارش'}</h2><span class="spacer"></span>
-            ${mine ? `<span class="badge">${deals.filter((d) => d.status === 'pending').length} در انتظار</span><span class="badge blue">تأییدشده: <span class="num">${fmt(accepted)}</span></span>` : ''}</div>
-          ${sorted.length ? sorted.map((d) => dealCard(d, o, mine)).join('') : emptyBox(mine ? 'هنوز درخواستی دریافت نکرده‌اید' : 'هنوز درخواستی نفرستاده‌اید')}
+          <div class="row" style="margin-bottom:12px"><h2 style="margin:0">${mine || ADMIN_MODE ? 'درخواست‌های دریافتی' : 'درخواست‌های شما'}</h2><span class="spacer"></span>${pendingN && (mine || ADMIN_MODE) ? `<span class="badge warn">${pendingN} در انتظار</span>` : ''}</div>
+          ${sorted.length ? sorted.map((d) => dealCard(d, o, mine)).join('') : emptyBox(mine ? 'درخواستی دریافت نشده است.' : 'درخواستی ارسال نکرده‌اید.')}
         </div>
       </div>
       <aside class="card card-pad">
-        <h3>پیشنهادهای رقابتی ${esc(a.name)}</h3>
-        <p class="muted small" style="margin-top:-6px">مقایسه با سایر پیشنهادهای فعال همین دارایی</p>
-        ${competitors.length ? `<table class="data"><thead><tr><th>نوع</th><th>مقدار</th><th>نرخ</th></tr></thead><tbody>${competitors.map((x) => `<tr class="clickable" data-href="#order-${x.id}"><td>${sideBadge(x.side)}</td><td class="num">${fmt(x.remaining)}</td><td class="num"><b>${fmt(x.price)}</b> ${x.side === o.side ? (x.price === o.price ? '' : (o.side === 'sell' ? (x.price < o.price ? '<span class="chg down small">ارزان‌تر</span>' : '') : (x.price > o.price ? '<span class="chg up small">بالاتر</span>' : ''))) : ''}</td></tr>`).join('')}</tbody></table>` : emptyBox('پیشنهاد دیگری نیست')}
+        <h3>مقایسه با پیشنهادهای دیگر</h3>
+        ${others.length ? `<table class="data"><thead><tr><th>نوع</th><th>مقدار</th><th>نرخ</th></tr></thead><tbody>${others.map((x) => `<tr class="clickable" data-href="#order-${x.id}"><td>${sideBadge(x.side)}</td><td class="num">${fmt(x.remaining)}</td><td class="num"><b>${fmt(x.price)}</b></td></tr>`).join('')}</tbody></table>` : emptyBox('پیشنهاد دیگری وجود ندارد.')}
       </aside>
     </div>`;
   }
@@ -644,82 +709,81 @@
     const other = user(mine ? d.requesterId : d.ownerId);
     const maxAccept = Math.min(d.amount, o.remaining);
     return `<div class="req ${d.status}">
-      <div class="row"><b>${mine ? nameLink(d.requesterId) : 'درخواست شما'}</b>${dealBadge(d.status)}<span class="spacer"></span><span class="muted small">${ago(d.createdAt)}</span></div>
-      <div class="row small" style="margin-top:6px"><span>مقدار درخواستی: <b class="num">${fmt(d.amount)}</b> ${esc(o.unit)}</span>
-        ${d.acceptedAmount ? `<span>· تأییدشده: <b class="num" style="color:var(--blue)">${fmt(d.acceptedAmount)}</b></span>` : ''}
+      <div class="row"><b>${mine || ADMIN_MODE ? nameLink(d.requesterId) : 'درخواست شما'}</b>${dealBadge(d.status)}<span class="spacer"></span><span class="muted small">${ago(d.createdAt)}</span></div>
+      <div class="row small" style="margin-top:6px"><span>درخواست: <b class="num">${fmt(d.amount)}</b> ${esc(o.unit)}</span>
+        ${d.acceptedAmount ? `<span>· تأیید شده: <b class="num" style="color:var(--blue-2)">${fmt(d.acceptedAmount)}</b></span>` : ''}
         <span>· ارزش: <span class="num">${fmt((d.acceptedAmount || d.amount) * d.price, 2)}</span> ${esc(o.priceCurrency)}</span></div>
-      ${d.note ? `<div class="small muted" style="margin-top:4px">💬 ${esc(d.note)}</div>` : ''}
+      ${d.note ? `<div class="small muted" style="margin-top:4px">پیام: ${esc(d.note)}</div>` : ''}
       ${d.reason ? `<div class="small muted">دلیل: ${esc(d.reason)}</div>` : ''}
       ${mine && d.status === 'pending' && other && other.phone ? `<div class="small" style="margin-top:4px">تماس: <span class="num">${esc(other.phone)}</span></div>` : ''}
       <div class="row" style="margin-top:10px">
         ${mine && d.status === 'pending' ? (maxAccept > 0
-          ? `<input class="input num" style="width:130px;padding:6px 10px" data-accept-amt="${d.id}" value="${maxAccept}" inputmode="decimal" aria-label="مقدار تأیید">
+          ? `<input class="input num" style="width:130px;padding:7px 12px" data-accept-amt="${d.id}" value="${maxAccept}" inputmode="decimal" aria-label="مقدار تأیید">
              <button class="btn btn-primary btn-sm" data-act="accept" data-id="${d.id}">${maxAccept < d.amount ? 'تأیید جزئی' : 'تأیید'}</button>`
-          : '<span class="muted small">مقدار باقی‌مانده کافی نیست</span>') + `<button class="btn btn-sm" data-act="reject" data-id="${d.id}">رد</button>` : ''}
-        ${!mine && d.status === 'pending' ? `<button class="btn btn-sm" data-act="withdraw" data-id="${d.id}">پس‌گرفتن درخواست</button>` : ''}
-        ${['accepted', 'completed'].includes(d.status) ? `<a class="btn btn-sm" href="#deal-${d.id}">مشاهده معامله و گفتگو ←</a>` : ''}
+          : '<span class="muted small">مقدار باقی‌مانده کافی نیست.</span>') + `<button class="btn btn-sm" data-act="reject" data-id="${d.id}">رد</button>` : ''}
+        ${!mine && !ADMIN_MODE && d.status === 'pending' ? `<button class="btn btn-sm" data-act="withdraw" data-id="${d.id}">لغو درخواست</button>` : ''}
+        ${['accepted', 'completed'].includes(d.status) ? `<a class="btn btn-sm" href="#deal-${d.id}">صفحه معامله</a>` : ''}
       </div></div>`;
   }
 
-  /* ---------- deal detail ---------- */
+  /* ---------- deal page ---------- */
   function pageDeal(id) {
     const d = view.deals.find((x) => x.id === id);
-    if (!d) return gate('این معامله پیدا نشد.', '<a class="btn" href="#dashboard">داشبورد</a>');
+    if (!d) return gate('این معامله یافت نشد.', `<a class="btn" href="#${ADMIN_MODE ? 'admin-deals' : 'dashboard'}">بازگشت</a>`);
     const o = orderOf(d.orderId) || { unit: '', priceCurrency: '', side: 'sell', assetId: 0 };
     const a = asset(o.assetId);
     const m = me();
-    const iAmOwner = d.ownerId === m.id, iAmReq = d.requesterId === m.id, party = iAmOwner || iAmReq;
+    const iAmOwner = d.ownerId === m.id, iAmReq = d.requesterId === m.id, party = !ADMIN_MODE && (iAmOwner || iAmReq);
     const sellerId = o.side === 'sell' ? d.ownerId : d.requesterId, buyerId = o.side === 'sell' ? d.requesterId : d.ownerId;
     const amt = d.acceptedAmount || d.amount;
-    const myDone = iAmOwner ? d.ownerDone : d.requesterDone;
+    const myDone = iAmOwner ? d.ownerDone : d.requesterDone, otherDone = iAmOwner ? d.requesterDone : d.ownerDone;
     const msgs = view.messages.filter((x) => x.dealId === d.id);
     const partyCard = (uid, role) => {
-      const u = user(uid);
-      if (!u) return '';
+      const u = user(uid); if (!u) return '';
       return `<div class="card card-pad"><span class="muted small">${role}</span>
-        <div style="font-weight:800;font-size:16px"><a href="#user-${u.id}">${esc(u.company)}</a> ${u.status === 'approved' ? ICON.check : ''}</div>
-        <div class="muted small">${esc(u.name)} · ${E.ACTIVITIES[u.activity] || ''}</div>
-        ${u.phone ? `<div class="row small" style="margin-top:8px"><span>📞 <span class="num">${esc(u.phone)}</span></span>
-          ${u.whatsapp ? `<a class="badge ok" href="https://wa.me/${esc(u.whatsapp.replace(/^0/, '93').replace(/\D/g, ''))}" target="_blank" rel="noopener">${ICON.wa} واتس‌اپ <span class="num">${esc(u.whatsapp)}</span></a>` : ''}</div>`
-          : `<div class="muted small" style="margin-top:8px">${d.status === 'pending' ? 'اطلاعات تماس پس از تأیید درخواست نمایش داده می‌شود' : 'این عضو اطلاعات تماس را مخفی کرده است'}</div>`}
+        <div style="font-weight:800;font-size:16px">${nameLink(u.id)}</div>
+        <div class="muted small">${esc(u.name)} · ${E.ACTIVITIES[u.activity] || ''}${u.province ? ' · ' + esc(u.province) : ''}</div>
+        ${u.phone ? `<div class="row small" style="margin-top:8px"><span>تماس: <span class="num">${esc(u.phone)}</span></span>${u.whatsapp ? `<a class="badge ok" href="${waHref(u.whatsapp)}" target="_blank" rel="noopener">${ICON.wa} واتس‌اپ</a>` : ''}</div>`
+          : `<div class="muted small" style="margin-top:8px">${d.status === 'pending' ? 'پس از تأیید درخواست نمایش داده می‌شود.' : 'اطلاعات تماس مخفی است.'}</div>`}
       </div>`;
     };
-    const steps = [
-      ['ارسال درخواست', true, d.createdAt],
-      ['تأیید صاحب سفارش', ['accepted', 'completed'].includes(d.status) || (d.status === 'cancelled' && d.acceptedAt), d.acceptedAt],
-      ['اعلام تکمیل توسط فروشنده', (o.side === 'sell' ? d.ownerDone : d.requesterDone)],
-      ['اعلام تکمیل توسط خریدار', (o.side === 'sell' ? d.requesterDone : d.ownerDone)],
-      ['معامله نهایی شد', d.status === 'completed', d.completedAt],
-    ];
-    return `
-    <div class="page-head"><div><h1>معامله #${d.id} — ${esc(a.name)}</h1><p>${dealBadge(d.status)} · سفارش <a href="#order-${d.orderId}">#${d.orderId}</a> · ${party ? (m.id === buyerId ? 'شما خریدار هستید' : 'شما فروشنده هستید') : 'نمای مدیر'}</p></div>
-      <div class="row">
-        ${party && d.status === 'pending' && iAmOwner ? `<button class="btn btn-primary" data-act="accept" data-id="${d.id}">تأیید</button><button class="btn" data-act="reject" data-id="${d.id}">رد</button>` : ''}
-        ${party && d.status === 'pending' && iAmReq ? `<button class="btn" data-act="withdraw" data-id="${d.id}">پس‌گرفتن درخواست</button>` : ''}
-        ${party && d.status === 'accepted' && !myDone ? `<button class="btn btn-buy" data-act="complete" data-id="${d.id}">✓ معامله انجام شد</button>` : ''}
-        ${d.status === 'accepted' && (party || isAdmin()) ? `<button class="btn" data-act="cancel-deal" data-id="${d.id}">لغو معامله</button>` : ''}
-      </div></div>
-    ${party && d.status === 'accepted' && myDone ? '<div class="notice" style="margin-bottom:16px">شما تکمیل معامله را اعلام کرده‌اید. منتظر تأیید طرف مقابل هستیم.</div>' : ''}
-    <div class="split">
+    let cur = 0, note = '';
+    if (d.status === 'pending') { cur = 1; note = iAmOwner ? '<b>اقدام شما:</b> درخواست را تأیید یا رد کنید.' : 'در انتظار پاسخ صاحب سفارش.'; }
+    else if (d.status === 'accepted') {
+      cur = myDone || otherDone ? 3 : 2;
+      note = !party ? 'معامله در حال اجراست.' : myDone ? 'تکمیل را اعلام کرده‌اید. در انتظار تأیید طرف مقابل.' : otherDone ? '<b>اقدام شما:</b> طرف مقابل تکمیل را اعلام کرده است. پس از اطمینان از تحویل، تکمیل را تأیید کنید.' : '<b>اقدام شما:</b> با طرف مقابل تماس بگیرید، تحویل و تسویه را انجام دهید و سپس «تأیید تکمیل» را بزنید.';
+    } else if (d.status === 'completed') { cur = 5; note = 'معامله توسط هر دو طرف تکمیل شده است.'; }
+    else { cur = 1; note = `این درخواست ${E.DEAL_STATUS[d.status]}.${d.reason ? ' دلیل: ' + esc(d.reason) : ''}`; }
+    return `${pageHead(`معامله #${d.id} — ${esc(a.name)}`, `${dealBadge(d.status)} · سفارش <a href="#order-${d.orderId}">#${d.orderId}</a>${party ? ` · نقش شما: ${m.id === buyerId ? 'خریدار' : 'فروشنده'}` : ''}`,
+      `${party && d.status === 'pending' && iAmOwner ? `<button class="btn btn-primary" data-act="accept" data-id="${d.id}">تأیید</button><button class="btn" data-act="reject" data-id="${d.id}">رد</button>` : ''}
+       ${party && d.status === 'pending' && iAmReq ? `<button class="btn" data-act="withdraw" data-id="${d.id}">لغو درخواست</button>` : ''}
+       ${party && d.status === 'accepted' && !myDone ? `<button class="btn btn-buy" data-act="complete" data-id="${d.id}">تأیید تکمیل</button>` : ''}
+       ${d.status === 'accepted' && (party || ADMIN_MODE) ? `<button class="btn" data-act="cancel-deal" data-id="${d.id}">لغو معامله</button>` : ''}`)}
+    ${stepper(['ارسال درخواست', 'تأیید صاحب سفارش', 'تحویل و تسویه', 'تأیید تکمیل دو طرف'], ['rejected', 'cancelled'].includes(d.status) ? 1 : Math.min(cur, 4), note)}
+    <div class="split" style="margin-top:22px">
       <div class="stack">
         <div class="card card-pad"><div class="grid g4">
           <div><span class="muted small">دارایی</span><div>${assetChip(a)}</div></div>
-          <div><span class="muted small">مقدار ${d.acceptedAmount ? 'تأییدشده' : 'درخواستی'}</span><div class="price"><span class="num">${fmt(amt)}</span> <span class="small muted">${esc(o.unit)}</span></div>${d.acceptedAmount && d.acceptedAmount !== d.amount ? `<div class="muted small">از درخواست <span class="num">${fmt(d.amount)}</span></div>` : ''}</div>
+          <div><span class="muted small">مقدار ${d.acceptedAmount ? 'تأییدشده' : 'درخواستی'}</span><div class="price"><span class="num">${fmt(amt)}</span> <span class="small muted">${esc(o.unit)}</span></div></div>
           <div><span class="muted small">نرخ</span><div class="price"><span class="num">${fmt(d.price)}</span> <span class="small muted">${esc(o.priceCurrency)}</span></div></div>
           <div><span class="muted small">ارزش معامله</span><div class="price"><span class="num">${fmt(amt * d.price, 2)}</span> <span class="small muted">${esc(o.priceCurrency)}</span></div></div>
-        </div>${d.note ? `<p class="small muted" style="margin:12px 0 0">💬 پیام درخواست: ${esc(d.note)}</p>` : ''}${d.reason ? `<p class="small muted" style="margin:6px 0 0">دلیل: ${esc(d.reason)}</p>` : ''}</div>
+        </div>${d.note ? `<p class="small muted" style="margin:12px 0 0">پیام درخواست: ${esc(d.note)}</p>` : ''}</div>
         <div class="grid g2">${partyCard(sellerId, 'فروشنده')}${partyCard(buyerId, 'خریدار')}</div>
         <div class="card card-pad">
-          <h3>گفتگو</h3>
-          <div class="chat">${msgs.length ? msgs.map((x) => `<div class="bubble ${x.userId === m.id ? 'mine' : ''}">${x.userId !== m.id ? `<b class="small">${esc((user(x.userId) || {}).company || '')}</b><br>` : ''}${esc(x.text)}<time>${ago(x.at)}</time></div>`).join('') : '<p class="muted small" style="text-align:center">هنوز پیامی رد و بدل نشده است.</p>'}</div>
-          ${party && ['pending', 'accepted', 'completed'].includes(d.status) ? `<form class="row" data-form="message" data-id="${d.id}" style="margin-top:10px"><input class="input" name="text" placeholder="پیام خود را بنویسید…" style="flex:1" autocomplete="off" required><button class="btn btn-primary">ارسال</button></form>` : ''}
+          <h3>پیام‌ها</h3>
+          <div class="chat">${msgs.length ? msgs.map((x) => `<div class="bubble ${x.userId === m.id ? 'mine' : ''}">${x.userId !== m.id ? `<b class="small">${esc((user(x.userId) || {}).company || '')}</b><br>` : ''}${esc(x.text)}<time>${ago(x.at)}</time></div>`).join('') : '<p class="muted small" style="text-align:center">پیامی ثبت نشده است.</p>'}</div>
+          ${party && ['pending', 'accepted', 'completed'].includes(d.status) ? `<form class="row" data-form="message" data-id="${d.id}" style="margin-top:12px"><input class="input" name="text" placeholder="متن پیام" style="flex:1" autocomplete="off" required><button class="btn btn-primary">ارسال</button></form>` : ''}
         </div>
       </div>
       <aside class="stack">
-        <div class="card card-pad"><h3>مراحل معامله</h3><ul class="timeline">${steps.map(([t, done, at]) => `<li class="${done ? 'done' : ''}">${t}${done && at ? `<div class="muted small">${fmtDate(at)}</div>` : ''}</li>`).join('')}</ul>
-          ${['rejected', 'cancelled'].includes(d.status) ? `<div class="notice warn small">این معامله ${E.DEAL_STATUS[d.status]} است.</div>` : ''}</div>
-        ${party ? `<div class="card card-pad"><h3>مشکل دارید؟</h3><p class="muted small" style="margin-top:0">اگر طرف مقابل تخلف کرده است، به مدیر گزارش دهید.</p><button class="btn btn-sm" data-act="report" data-uid="${iAmOwner ? d.requesterId : d.ownerId}" data-deal="${d.id}">گزارش تخلف</button></div>` : ''}
-        <div class="notice small">انتقال پول و تحویل دارایی بیرون از سایت و مستقیماً بین دو طرف انجام می‌شود. قبل از تحویل، هویت طرف مقابل را بررسی کنید.</div>
+        <div class="card card-pad"><h3>سابقه</h3><dl class="kv">
+          <dt>ارسال درخواست</dt><dd>${fmtDate(d.createdAt)}</dd>
+          ${d.acceptedAt ? `<dt>تأیید</dt><dd>${fmtDate(d.acceptedAt)}</dd>` : ''}
+          <dt>اعلام تکمیل فروشنده</dt><dd>${(o.side === 'sell' ? d.ownerDone : d.requesterDone) ? 'بله' : '—'}</dd>
+          <dt>اعلام تکمیل خریدار</dt><dd>${(o.side === 'sell' ? d.requesterDone : d.ownerDone) ? 'بله' : '—'}</dd>
+          ${d.completedAt ? `<dt>تکمیل</dt><dd>${fmtDate(d.completedAt)}</dd>` : ''}</dl></div>
+        ${party ? `<div class="card card-pad"><h3>گزارش تخلف</h3><p class="muted small" style="margin-top:0">در صورت تخلف طرف مقابل، به مدیریت گزارش دهید.</p><button class="btn btn-sm" data-act="report" data-uid="${iAmOwner ? d.requesterId : d.ownerId}" data-deal="${d.id}">ثبت گزارش</button></div>` : ''}
+        <div class="notice small">پرداخت و تحویل خارج از سامانه انجام می‌شود. پیش از تحویل، هویت طرف مقابل را بررسی کنید.</div>
       </aside>
     </div>`;
   }
@@ -730,166 +794,175 @@
     const myOrders = view.orders.filter((o) => o.userId === m.id);
     const received = view.deals.filter((d) => d.ownerId === m.id);
     const sent = view.deals.filter((d) => d.requesterId === m.id);
-    const mineDeals = view.deals.filter((d) => d.ownerId === m.id || d.requesterId === m.id);
-    const activeDeals = mineDeals.filter((d) => d.status === 'accepted');
-    const doneDeals = mineDeals.filter((d) => d.status === 'completed');
+    const mine = view.deals.filter((d) => d.ownerId === m.id || d.requesterId === m.id);
     const pendingIn = received.filter((d) => d.status === 'pending');
-    const unread = view.notifications.filter((n) => !n.read).length;
-    const tabs = [
-      ['overview', 'نمای کلی'], ['orders', 'سفارش‌های من', myOrders.filter((o) => o.status === 'active').length],
+    const tabs = [['overview', 'نمای کلی'], ['orders', 'سفارش‌های من', myOrders.filter((o) => o.status === 'active').length],
       ['received', 'درخواست‌های دریافتی', pendingIn.length, true], ['sent', 'درخواست‌های ارسالی', sent.filter((d) => d.status === 'pending').length],
-      ['active', 'در حال انجام', activeDeals.length], ['done', 'تکمیل‌شده', doneDeals.length],
-      ['cancelled', 'لغوشده'], ['history', 'تاریخچه'], ['notifs', 'اعلان‌ها', unread, true],
-    ];
+      ['deals', 'معاملات', mine.filter((d) => d.status === 'accepted').length], ['notifs', 'اعلان‌ها', view.unread, true]];
     const tabBar = `<div class="tabs">${tabs.map(([k, l, c, hot]) => `<a href="#dashboard${k === 'overview' ? '' : '-' + k}" class="${tab === k ? 'on' : ''}">${l}${c ? `<span class="count ${hot ? 'hot' : ''}">${c}</span>` : ''}</a>`).join('')}</div>`;
     let body = '';
-    const dealsList = (ds, emptyText) => ds.length ? dealsTable(ds) : emptyBox(emptyText);
-
     if (tab === 'overview') {
-      const remaining = {};
-      for (const o of myOrders.filter((x) => x.status === 'active')) {
-        const k = `${o.assetId}|${o.side}`;
-        remaining[k] = remaining[k] || { a: asset(o.assetId), side: o.side, unit: o.unit, amt: 0, total: 0 };
-        remaining[k].amt += o.remaining; remaining[k].total += o.amount;
+      // Action inbox: everything that needs this member's decision, in plain sentences.
+      const todo = [];
+      for (const d of pendingIn) { const o = orderOf(d.orderId) || {}; const u = user(d.requesterId); todo.push({ t: d.createdAt, html: `<b>${esc(u ? u.company : '')}</b> درخواست ${o.side === 'sell' ? 'خرید' : 'فروش'} <b class="num">${fmt(d.amount)}</b> ${esc(o.unit || '')} ${esc(asset(o.assetId).name)} از سفارش #${d.orderId} را فرستاده است.`, btn: `<a class="btn btn-primary btn-sm" href="#order-${d.orderId}">بررسی</a>` }); }
+      for (const d of mine.filter((x) => x.status === 'accepted')) {
+        const myDone = d.ownerId === m.id ? d.ownerDone : d.requesterDone, otherDone = d.ownerId === m.id ? d.requesterDone : d.ownerDone;
+        if (!myDone) todo.push({ t: d.updatedAt, html: otherDone ? `طرف مقابل تکمیل معامله #${d.id} را اعلام کرده است. پس از اطمینان از تحویل، تأیید کنید.` : `معامله #${d.id} تأیید شده است. پس از تحویل و تسویه، تکمیل را اعلام کنید.`, btn: `<a class="btn btn-buy btn-sm" href="#deal-${d.id}">مشاهده</a>` });
       }
+      todo.sort((a, b) => b.t - a.t);
+      const waiting = [
+        ...sent.filter((d) => d.status === 'pending').map((d) => ({ html: `درخواست شما برای سفارش #${d.orderId} در انتظار پاسخ است.`, href: `#order-${d.orderId}` })),
+        ...mine.filter((d) => d.status === 'accepted' && (d.ownerId === m.id ? d.ownerDone : d.requesterDone)).map((d) => ({ html: `در انتظار تأیید تکمیل معامله #${d.id} توسط طرف مقابل.`, href: `#deal-${d.id}` })),
+      ];
       body = `
-      <div class="grid g4" style="margin-bottom:18px">
-        <div class="card tile sheen"><span>سفارش‌های فعال</span><b class="num" data-count="${myOrders.filter((o) => o.status === 'active').length}">${myOrders.filter((o) => o.status === 'active').length}</b></div>
-        <div class="card tile sheen"><span>درخواست‌های منتظر پاسخ</span><b class="num" style="color:${pendingIn.length ? 'var(--sell)' : 'inherit'}" data-count="${pendingIn.length}">${pendingIn.length}</b></div>
-        <div class="card tile sheen"><span>معاملات در حال انجام</span><b class="num" style="color:var(--blue)" data-count="${activeDeals.length}">${activeDeals.length}</b></div>
-        <div class="card tile sheen"><span>معاملات تکمیل‌شده</span><b class="num" style="color:var(--buy)" data-count="${doneDeals.length}">${doneDeals.length}</b></div>
+      <div class="grid g4" style="margin-bottom:22px">
+        <div class="card tile sheen"><span>سفارش فعال</span><b class="num" data-count="${myOrders.filter((o) => o.status === 'active').length}">${myOrders.filter((o) => o.status === 'active').length}</b></div>
+        <div class="card tile sheen"><span>درخواست در انتظار پاسخ شما</span><b class="num" style="color:${pendingIn.length ? 'var(--sell)' : 'inherit'}" data-count="${pendingIn.length}">${pendingIn.length}</b></div>
+        <div class="card tile sheen"><span>معامله در حال اجرا</span><b class="num" style="color:var(--blue-2)" data-count="${mine.filter((d) => d.status === 'accepted').length}">${mine.filter((d) => d.status === 'accepted').length}</b></div>
+        <div class="card tile sheen"><span>معامله تکمیل‌شده</span><b class="num" style="color:var(--buy)" data-count="${mine.filter((d) => d.status === 'completed').length}">${mine.filter((d) => d.status === 'completed').length}</b></div>
       </div>
       <div class="split">
         <div class="stack">
-          <div class="card"><div class="row card-pad" style="padding-bottom:0"><h2 style="margin:0">درخواست‌های منتظر پاسخ شما</h2><span class="spacer"></span><a href="#dashboard-received" class="small">همه ←</a></div><div style="padding:12px">${pendingIn.length ? dealsTable(pendingIn.slice(0, 5)) : emptyBox('درخواست جدیدی ندارید')}</div></div>
-          <div class="card"><div class="row card-pad" style="padding-bottom:0"><h2 style="margin:0">معاملات در حال انجام</h2></div><div style="padding:12px">${activeDeals.length ? dealsTable(activeDeals) : emptyBox('معامله در حال انجامی ندارید')}</div></div>
+          <div class="card card-pad ${todo.length ? 'glow g-warm' : ''}"><h2>اقدامات لازم</h2>
+            ${todo.length ? todo.map((x) => `<div class="todo"><span class="todo-dot"></span><div style="flex:1">${x.html}</div>${x.btn}</div>`).join('') : '<p class="muted" style="margin:0">موردی برای اقدام وجود ندارد.</p>'}</div>
+          <div class="card card-pad"><h2>در انتظار طرف مقابل</h2>
+            ${waiting.length ? waiting.map((x) => `<a class="todo" href="${x.href}" style="color:inherit"><span class="todo-dot muted-dot"></span><div style="flex:1">${x.html}</div><span class="muted">‹</span></a>`).join('') : '<p class="muted" style="margin:0">موردی وجود ندارد.</p>'}</div>
         </div>
         <aside class="stack">
-          <div class="card card-pad"><h3>مقدار دارایی باقی‌مانده در سفارش‌ها</h3>
-            ${Object.values(remaining).length ? Object.values(remaining).map((r) => `<div style="margin-bottom:12px"><div class="row small" style="justify-content:space-between"><span>${sideBadge(r.side)} ${esc(r.a.name)}</span><span><b class="num">${fmt(r.amt)}</b> / <span class="num">${fmt(r.total)}</span> ${esc(r.unit)}</span></div><div class="progress"><i style="width:${r.total ? Math.round((r.amt / r.total) * 100) : 0}%"></i></div></div>`).join('') : '<p class="muted small">سفارش فعالی ندارید.</p>'}
-            ${approved() ? '<a class="btn btn-primary btn-block" href="#new">+ ثبت سفارش جدید</a>' : '<div class="notice warn small">برای ثبت سفارش، حساب شما باید توسط مدیر تأیید شود.</div>'}
+          <div class="card card-pad"><h3>موجودی سفارش‌های فعال</h3>
+            ${remainingBlock(myOrders)}
+            ${approved() ? '<a class="btn btn-primary btn-block" href="#new">ثبت سفارش</a>' : ''}
           </div>
-          <div class="card card-pad"><h3>آخرین اعلان‌ها</h3>${view.notifications.slice(0, 5).map((n) => `<div class="small" style="padding:6px 0;border-bottom:1px solid var(--line)">${esc(n.text)}<div class="muted" style="font-size:11px">${ago(n.at)}</div></div>`).join('') || '<p class="muted small">اعلانی نیست</p>'}</div>
+          <div class="card card-pad"><h3>آخرین اعلان‌ها</h3>${view.notifications.slice(0, 5).map((n) => `<div class="small" style="padding:7px 0;border-bottom:1px solid var(--line)">${esc(n.text)}<div class="muted" style="font-size:11px">${ago(n.at)}</div></div>`).join('') || '<p class="muted small">اعلانی وجود ندارد.</p>'}
+            <div style="margin-top:10px">${notifPermissionButton()}</div></div>
         </aside>
       </div>`;
     } else if (tab === 'orders') {
       const live = (o) => ['active', 'filled'].includes(o.status);
-      const sells = myOrders.filter((o) => o.side === 'sell' && live(o)).sort((a, b) => b.createdAt - a.createdAt);
-      const buys = myOrders.filter((o) => o.side === 'buy' && live(o)).sort((a, b) => b.createdAt - a.createdAt);
+      const by = (side) => myOrders.filter((o) => o.side === side && live(o)).sort((a, b) => b.createdAt - a.createdAt);
+      const past = myOrders.filter((o) => !live(o)).sort((a, b) => b.updatedAt - a.updatedAt);
       body = `<div class="stack">
-        <div class="card"><div class="card-pad" style="padding-bottom:4px"><h2>سفارش‌های فروش من</h2></div>${ordersTable(sells, { noOwner: true, empty: 'سفارش فروش فعالی ندارید' })}</div>
-        <div class="card"><div class="card-pad" style="padding-bottom:4px"><h2>سفارش‌های خرید من</h2></div>${ordersTable(buys, { noOwner: true, empty: 'سفارش خرید فعالی ندارید' })}</div></div>`;
-    } else if (tab === 'received') body = `<div class="card" style="padding:12px">${dealsList(sortDeals(received), 'هنوز درخواستی دریافت نکرده‌اید')}</div>`;
-    else if (tab === 'sent') body = `<div class="card" style="padding:12px">${dealsList(sortDeals(sent), 'هنوز درخواستی نفرستاده‌اید')}</div>`;
-    else if (tab === 'active') body = `<div class="card" style="padding:12px">${dealsList(activeDeals, 'معامله در حال انجامی ندارید')}</div>`;
-    else if (tab === 'done') body = `<div class="card" style="padding:12px">${dealsList(doneDeals, 'هنوز معامله‌ای تکمیل نشده است')}</div>`;
-    else if (tab === 'cancelled') {
-      const os = myOrders.filter((o) => ['cancelled', 'closed', 'expired'].includes(o.status));
-      const ds = mineDeals.filter((d) => ['cancelled', 'rejected'].includes(d.status));
-      body = `<div class="stack"><div class="card"><div class="card-pad" style="padding-bottom:4px"><h2>سفارش‌های لغوشده، بسته یا منقضی</h2></div>${ordersTable(os, { noOwner: true, empty: 'موردی نیست' })}</div>
-        <div class="card" style="padding:12px"><h2 style="padding:8px">درخواست‌های ردشده یا لغوشده</h2>${dealsList(ds, 'موردی نیست')}</div></div>`;
-    } else if (tab === 'history') {
-      const rows = [...myOrders.map((o) => ({ at: o.createdAt, t: `ثبت سفارش ${o.side === 'sell' ? 'فروش' : 'خرید'} ${fmt(o.amount)} ${o.unit} ${asset(o.assetId).name} با نرخ ${fmt(o.price)}`, href: `#order-${o.id}`, b: orderBadge(o.status) })),
-        ...mineDeals.map((d) => ({ at: d.updatedAt, t: `${d.ownerId === m.id ? 'درخواست دریافتی' : 'درخواست ارسالی'} — ${fmt(d.acceptedAmount || d.amount)} ${asset((orderOf(d.orderId) || {}).assetId).name} (سفارش #${d.orderId})`, href: `#deal-${d.id}`, b: dealBadge(d.status) }))]
-        .sort((a, b) => b.at - a.at);
-      body = `<div class="card">${rows.length ? `<table class="data responsive"><thead><tr><th>زمان</th><th>رویداد</th><th>وضعیت</th></tr></thead><tbody>${rows.map((r) => `<tr class="clickable" data-href="${r.href}"><td data-l="زمان" class="small">${fmtDate(r.at)}</td><td class="cell-main" data-l="">${esc(r.t)}</td><td data-l="وضعیت">${r.b}</td></tr>`).join('')}</tbody></table>` : emptyBox('تاریخچه‌ای نیست')}</div>`;
+        <div class="card"><div class="card-pad" style="padding-bottom:0"><h2>سفارش‌های فروش</h2></div>${ordersTable(by('sell'), { noOwner: true, empty: 'سفارش فروش فعالی ندارید.' })}</div>
+        <div class="card"><div class="card-pad" style="padding-bottom:0"><h2>سفارش‌های خرید</h2></div>${ordersTable(by('buy'), { noOwner: true, empty: 'سفارش خرید فعالی ندارید.' })}</div>
+        ${past.length ? `<div class="card"><div class="card-pad" style="padding-bottom:0"><h2>سفارش‌های بسته و منقضی</h2></div>${ordersTable(past.slice(0, 30), { noOwner: true })}</div>` : ''}</div>`;
+    } else if (tab === 'received') body = `<div class="card">${received.length ? dealsTable(sortDeals(received)) : emptyBox('درخواستی دریافت نکرده‌اید.')}</div>`;
+    else if (tab === 'sent') body = `<div class="card">${sent.length ? dealsTable(sortDeals(sent)) : emptyBox('درخواستی ارسال نکرده‌اید.')}</div>`;
+    else if (tab === 'deals') {
+      const f = ui.dealFilter;
+      const groups = { active: ['accepted'], done: ['completed'], closed: ['rejected', 'cancelled'] };
+      const list = mine.filter((d) => groups[f].includes(d.status)).sort((a, b) => b.updatedAt - a.updatedAt);
+      body = `<div class="seg" style="margin-bottom:16px">${[['active', 'در حال اجرا'], ['done', 'تکمیل‌شده'], ['closed', 'رد یا لغو شده']].map(([k, l]) => `<button class="${f === k ? 'on' : ''}" data-act="deal-filter" data-v="${k}">${l}</button>`).join('')}</div>
+        <div class="card">${list.length ? dealsTable(list) : emptyBox('موردی وجود ندارد.')}</div>`;
     } else if (tab === 'notifs') {
-      body = `<div class="card">${view.notifications.some((n) => !n.read) ? '<div class="row card-pad" style="padding:10px 16px"><span class="spacer"></span><button class="btn btn-sm" data-act="read-all">علامت‌گذاری همه به‌عنوان خوانده‌شده</button></div>' : ''}
-        ${view.notifications.length ? view.notifications.map((n) => `<div class="notif ${n.read ? '' : 'unread'}" data-act="open-notif" data-id="${n.id}" data-link="${esc(n.link)}">${esc(n.text)}<time>${fmtDate(n.at)}</time></div>`).join('') : emptyBox('اعلانی ندارید')}</div>`;
+      body = `<div class="card">${view.unread ? '<div class="row" style="padding:12px 16px"><span class="spacer"></span><button class="btn btn-sm" data-act="read-all">علامت‌گذاری همه</button></div>' : ''}
+        ${view.notifications.length ? view.notifications.map((n) => `<div class="notif ${n.read ? '' : 'unread'}" data-act="open-notif" data-id="${n.id}" data-link="${esc(n.link)}">${esc(n.text)}<time>${fmtDate(n.at)}</time></div>`).join('') : emptyBox('اعلانی وجود ندارد.')}</div>`;
     }
-    return `<div class="page-head"><div><h1>داشبورد ${esc(m.company)}</h1><p>${userBadge(m.status)} · ${E.ACTIVITIES[m.activity] || ''}</p></div>${approved() ? '<a class="btn btn-primary" href="#new">+ سفارش جدید</a>' : ''}</div>
-        ${m.status !== 'approved' ? '<div class="notice warn" style="margin-bottom:16px">حساب شما منتظر تأیید مدیر سیستم است. تا آن زمان امکان ثبت سفارش و ارسال درخواست وجود ندارد.</div>' : ''}
-      ${tabBar}${body}`;
+    return `${statusHero(m)}${pageHead(esc(m.company), `${userBadge(m.status)} · ${E.ACTIVITIES[m.activity] || ''}`, approved() ? '<a class="btn btn-primary" href="#new">ثبت سفارش</a>' : '')}${tabBar}${body}`;
+  }
+  function remainingBlock(myOrders) {
+    const rem = {};
+    for (const o of myOrders.filter((x) => x.status === 'active')) {
+      const k = `${o.assetId}|${o.side}`;
+      rem[k] = rem[k] || { a: asset(o.assetId), side: o.side, unit: o.unit, amt: 0, total: 0 };
+      rem[k].amt += o.remaining; rem[k].total += o.amount;
+    }
+    const v = Object.values(rem);
+    return v.length ? v.map((r) => `<div style="margin-bottom:12px"><div class="row small" style="justify-content:space-between"><span>${sideBadge(r.side)} ${esc(r.a.name)}</span><span><b class="num">${fmt(r.amt)}</b> / <span class="num">${fmt(r.total)}</span> ${esc(r.unit)}</span></div><div class="progress"><i style="width:${r.total ? Math.round((r.amt / r.total) * 100) : 0}%"></i></div></div>`).join('') : '<p class="muted small">سفارش فعالی ندارید.</p>';
   }
   const sortDeals = (ds) => ds.slice().sort((a, b) => (a.status === 'pending' ? 0 : 1) - (b.status === 'pending' ? 0 : 1) || b.updatedAt - a.updatedAt);
   function dealsTable(ds) {
     const m = me();
-    return `<div class="table-wrap"><table class="data responsive"><thead><tr><th>معامله</th><th>طرف مقابل</th><th>نقش شما</th><th>مقدار</th><th>نرخ</th><th>وضعیت</th><th></th></tr></thead><tbody>
+    return `<div class="table-wrap"><table class="data responsive"><thead><tr><th>معامله</th><th>${ADMIN_MODE ? 'صاحب سفارش' : 'طرف مقابل'}</th><th>${ADMIN_MODE ? 'درخواست‌دهنده' : 'نقش شما'}</th><th>مقدار</th><th>نرخ</th><th>وضعیت</th><th></th></tr></thead><tbody>
     ${ds.map((d) => {
       const o = orderOf(d.orderId) || { unit: '', side: 'sell', priceCurrency: '' };
-      const a = asset(o.assetId);
       const iOwn = d.ownerId === m.id;
       const iBuy = (o.side === 'sell') !== iOwn;
-      const otherId = iOwn ? d.requesterId : d.ownerId;
-      const roleTxt = !iOwn && d.requesterId !== m.id ? '—' : iBuy ? '<span class="badge buy">خریدار</span>' : '<span class="badge sell">فروشنده</span>';
       return `<tr class="clickable" data-href="#deal-${d.id}">
-        <td class="cell-main" data-l="">${assetChip(a, `معامله #${d.id} · ${ago(d.createdAt)}`)}</td>
-        <td data-l="طرف مقابل">${nameLink(otherId)}</td>
-        <td data-l="نقش شما">${roleTxt}</td>
-        <td data-l="مقدار"><span class="num">${fmt(d.acceptedAmount || d.amount)}</span> <span class="muted small">${esc(o.unit)}</span>${d.acceptedAmount && d.acceptedAmount !== d.amount ? `<div class="muted small">از <span class="num">${fmt(d.amount)}</span></div>` : ''}</td>
+        <td class="cell-main">${assetChip(asset(o.assetId), `معامله #${d.id} · ${ago(d.createdAt)}`)}</td>
+        <td data-l="${ADMIN_MODE ? 'صاحب سفارش' : 'طرف مقابل'}">${nameLink(ADMIN_MODE ? d.ownerId : iOwn ? d.requesterId : d.ownerId)}</td>
+        <td data-l="${ADMIN_MODE ? 'درخواست‌دهنده' : 'نقش شما'}">${ADMIN_MODE ? nameLink(d.requesterId) : iBuy ? '<span class="badge buy">خریدار</span>' : '<span class="badge sell">فروشنده</span>'}</td>
+        <td data-l="مقدار"><span class="num">${fmt(d.acceptedAmount || d.amount)}</span> <span class="muted small">${esc(o.unit)}</span></td>
         <td data-l="نرخ" class="num">${fmt(d.price)}</td>
         <td data-l="وضعیت">${dealBadge(d.status)}</td>
-        <td class="cell-act">${iOwn && d.status === 'pending' ? `<a class="btn btn-primary btn-sm" href="#order-${d.orderId}">بررسی</a>` : `<a class="btn btn-sm" href="#deal-${d.id}">جزئیات</a>`}</td></tr>`;
+        <td class="cell-act">${!ADMIN_MODE && iOwn && d.status === 'pending' ? `<a class="btn btn-primary btn-sm" href="#order-${d.orderId}">بررسی</a>` : `<a class="btn btn-sm" href="#deal-${d.id}">جزئیات</a>`}</td></tr>`;
     }).join('')}</tbody></table></div>`;
   }
 
-  /* ---------- profile ---------- */
+  /* ---------- profile, registration status ---------- */
+  const provinceOptions = (sel) => `<option value="">انتخاب ولایت</option>${E.PROVINCES.map((p) => `<option ${p === sel ? 'selected' : ''}>${p}</option>`).join('')}`;
+  function kycInputs(u = {}) {
+    return `<div class="grid g2">
+        <label class="field"><span>ولایت</span><select class="input" name="province" required>${provinceOptions(u.province)}</select></label>
+        <label class="field"><span>شهر / ولسوالی</span><input class="input" name="city" value="${esc(u.city || '')}"></label>
+      </div>
+      <label class="field"><span>آدرس دفتر یا دکان</span><input class="input" name="address" value="${esc(u.address || '')}" placeholder="مثال: سرای شهزاده، منزل دوم، دکان ۱۲" required></label>
+      <div class="grid g2">
+        <label class="field"><span>شماره جواز (در صورت وجود)</span><input class="input num" name="licenseNo" value="${esc(u.licenseNo || '')}"></label>
+        <label class="field"><span>سابقه کار</span><input class="input" name="experience" value="${esc(u.experience || '')}" placeholder="مثال: ۸ سال"></label>
+      </div>
+      <div class="grid g2">
+        <label class="field"><span>نام ضامن یا معرف</span><input class="input" name="guarantorName" value="${esc(u.guarantorName || '')}"></label>
+        <label class="field"><span>شماره تماس ضامن</span><input class="input num" name="guarantorPhone" inputmode="tel" value="${esc(u.guarantorPhone || '')}"></label>
+      </div>
+      <label class="field"><span>توضیحات</span><textarea class="input" name="about" placeholder="ارزها یا کالاهای مورد معامله (اختیاری)">${esc(u.about || '')}</textarea></label>`;
+  }
   function statusHero(m) {
     if (m.status === 'pending') return `<div class="card card-pad glow g-warm" style="text-align:center;margin-bottom:24px">
-      <div class="ring-big" style="width:130px;height:130px;margin:6px auto 14px"><span class="halo"></span>${ringSvg(0.7, 130, 8, '#ffb34d', '#ff6b7a')}<div class="center"><b style="font-size:30px">⏳</b></div></div>
-      <h2 style="margin:0 0 6px">درخواست شما در حال بررسی است</h2>
-      <p class="muted" style="margin:0">مشخصات شما برای مدیریت سرای شهزاده ارسال شد. به محض تأیید یا رد، از طریق اعلان به شما خبر داده می‌شود.</p>
-      ${notifPermissionButton()}</div>`;
+      <div class="ring-big" style="width:120px;height:120px;margin:6px auto 14px"><span class="halo"></span>${ringSvg(0.7, 120, 8, '#ffb34d', '#ff6b7a')}<div class="center"><b style="font-size:16px;text-shadow:none">در حال بررسی</b></div></div>
+      <h2 style="margin:0 0 6px">درخواست عضویت شما در حال بررسی است</h2>
+      <p class="muted" style="margin:0 0 12px">نتیجه بررسی از طریق اعلان به شما اطلاع داده می‌شود.</p>${notifPermissionButton()}</div>`;
     if (m.status === 'rejected') return `<div class="card card-pad glow g-sell" style="margin-bottom:24px">
       <h2 style="margin:0 0 6px;color:var(--sell)">درخواست عضویت شما رد شد</h2>
-      ${m.statusReason ? `<p style="margin:0 0 14px">دلیل مدیریت: <b>${esc(m.statusReason)}</b></p>` : ''}
-      <form class="stack" data-form="resubmit"><p class="muted small" style="margin:0">مشخصات را اصلاح کنید و دوباره بفرستید:</p>
-        <div class="grid g2"><label class="field"><span>نام و نام خانوادگی</span><input class="input" name="name" value="${esc(m.name)}" required></label>
-        <label class="field"><span>نام صرافی یا شرکت</span><input class="input" name="company" value="${esc(m.company)}" required></label></div>
+      ${m.statusReason ? `<p style="margin:0 0 14px">دلیل: <b>${esc(m.statusReason)}</b></p>` : ''}
+      <form class="stack" data-form="resubmit"><p class="muted small" style="margin:0">مشخصات را اصلاح و مجدداً ارسال کنید.</p>
+        <div class="grid g2"><label class="field"><span>نام و تخلص</span><input class="input" name="name" value="${esc(m.name)}" required></label>
+        <label class="field"><span>نام صرافی / شرکت</span><input class="input" name="company" value="${esc(m.company)}" required></label></div>
         ${kycInputs(m)}
-        <button class="btn btn-primary btn-lg">ارسال دوباره برای بررسی</button></form></div>`;
+        <button class="btn btn-primary btn-lg">ارسال مجدد</button></form></div>`;
+    if (m.status === 'blocked') return `<div class="card card-pad glow g-sell" style="margin-bottom:24px"><h2 style="margin:0;color:var(--sell)">حساب شما مسدود است</h2>${m.statusReason ? `<p style="margin:8px 0 0">دلیل: ${esc(m.statusReason)}</p>` : ''}</div>`;
     return '';
-  }
-  function notifPermissionButton() {
-    if (backend.mode !== 'server' || !('Notification' in window) || Notification.permission !== 'default') return '';
-    return '<button class="btn btn-sm" data-act="enable-push" style="margin-top:14px">🔔 فعال‌کردن اعلان روی گوشی</button>';
   }
   function pageProfile() {
     const m = me();
-    return `${statusHero(m)}<div class="page-head"><div><h1>پروفایل من</h1><p>${userBadge(m.status)} ${m.role === 'admin' ? '<span class="badge blue">مدیر سیستم</span>' : ''} · عضو از ${fmtDate(m.createdAt)}</p></div></div>
+    return `${statusHero(m)}${pageHead('پروفایل', `${userBadge(m.status)} · عضویت از ${fmtDate(m.createdAt)}`)}
     <div class="split">
       <form class="card card-pad stack" data-form="profile">
         <h2>مشخصات</h2>
         <div class="grid g2">
-          <label class="field"><span>نام و نام خانوادگی</span><input class="input" name="name" value="${esc(m.name)}" required></label>
-          <label class="field"><span>نام صرافی یا شرکت</span><input class="input" name="company" value="${esc(m.company)}" required></label>
-          <label class="field"><span>شماره تماس (قابل تغییر نیست)</span><input class="input num" value="${esc(m.phone)}" disabled></label>
+          <label class="field"><span>نام و تخلص</span><input class="input" name="name" value="${esc(m.name)}" required></label>
+          <label class="field"><span>نام صرافی / شرکت</span><input class="input" name="company" value="${esc(m.company)}" required></label>
+          <label class="field"><span>شماره تماس</span><input class="input num" value="${esc(m.phone)}" disabled></label>
           <label class="field"><span>شماره واتس‌اپ</span><input class="input num" name="whatsapp" value="${esc(m.whatsapp)}"></label>
         </div>
         <label class="field"><span>نوع فعالیت</span><select class="input" name="activity">${Object.entries(E.ACTIVITIES).map(([k, v]) => `<option value="${k}" ${m.activity === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
-        <label class="field"><span>معرفی کوتاه (آدرس دفتر، ساعات کاری…)</span><textarea class="input" name="bio">${esc(m.bio)}</textarea></label>
-        <label class="row small"><input type="checkbox" class="switch" name="showContact" ${m.showContact ? 'checked' : ''}> نمایش شماره تماس و واتس‌اپ به طرف معامله پس از تأیید درخواست</label>
-        <button class="btn btn-primary">ذخیره تغییرات</button>
+        <label class="field"><span>معرفی (آدرس، ساعات کاری)</span><textarea class="input" name="bio">${esc(m.bio)}</textarea></label>
+        <label class="row small"><input type="checkbox" class="switch" name="showContact" ${m.showContact ? 'checked' : ''}> نمایش شماره تماس به طرف معامله پس از تأیید درخواست</label>
+        <button class="btn btn-primary">ذخیره</button>
       </form>
       <aside class="stack">
-        <div class="card card-pad"><h3>وضعیت حساب</h3>
-          ${m.status === 'approved' ? `<p style="margin:0">${ICON.check} حساب شما تأیید شده است و نشان تأیید کنار نام شما نمایش داده می‌شود.</p>`
-            : m.status === 'rejected' ? `<p style="margin:0;color:var(--sell)">درخواست شما رد شده است.</p>${m.statusReason ? `<p class="small" style="margin:6px 0 0">دلیل: ${esc(m.statusReason)}</p>` : ''}`
-            : m.status === 'blocked' ? `<p style="margin:0;color:var(--sell)">حساب شما مسدود است.</p>`
-            : '<p class="muted" style="margin:0">مشخصات شما برای مدیریت ارسال شده و در حال بررسی است.</p>'}</div>
+        <div class="card card-pad"><h3>مشخصات ثبت‌شده نزد مدیریت</h3><dl class="kv">
+          <dt>ولایت</dt><dd>${esc(m.province || '—')}</dd><dt>آدرس</dt><dd>${esc(m.address || '—')}</dd><dt>ضامن</dt><dd>${esc(m.guarantorName || '—')}</dd></dl></div>
         <form class="card card-pad stack" data-form="password"><h3>تغییر رمز عبور</h3>
           <input class="input" type="password" name="current" placeholder="رمز فعلی" required autocomplete="current-password">
-          <input class="input" type="password" name="next" placeholder="رمز جدید (حداقل ۶ حرف)" required autocomplete="new-password">
+          <input class="input" type="password" name="next" placeholder="رمز جدید (حداقل ۸ حرف)" required autocomplete="new-password">
           <button class="btn">تغییر رمز</button></form>
       </aside>
     </div>`;
   }
-
   function pageUser(id) {
     const u = user(id);
-    if (!u) return gate('این عضو پیدا نشد.');
+    if (!u) return gate('این عضو یافت نشد.');
     const os = view.orders.filter((o) => o.userId === u.id && o.status === 'active');
-    const isMe = u.id === me().id;
-    return `<div class="page-head"><div><h1>${esc(u.company)} ${u.status === 'approved' ? ICON.check : ''}</h1><p>${esc(u.name)} · ${E.ACTIVITIES[u.activity] || ''} · ${userBadge(u.status)} · عضو از ${fmtDate(u.createdAt)}</p></div>
-      ${!isMe ? `<button class="btn btn-sm" data-act="report" data-uid="${u.id}">گزارش تخلف</button>` : ''}</div>
+    return `${pageHead(`${esc(u.company)} ${u.status === 'approved' ? ICON.check : ''}`, `${esc(u.name)} · ${E.ACTIVITIES[u.activity] || ''}${u.province ? ' · ' + esc(u.province) : ''} · عضویت از ${fmtDate(u.createdAt)}`,
+      u.id !== me().id ? `<button class="btn btn-sm" data-act="report" data-uid="${u.id}">ثبت گزارش</button>` : '')}
       ${u.bio ? `<div class="card card-pad" style="margin-bottom:16px">${esc(u.bio)}</div>` : ''}
-      ${u.phone ? `<div class="notice" style="margin-bottom:16px">📞 <span class="num">${esc(u.phone)}</span> · واتس‌اپ <span class="num">${esc(u.whatsapp || '')}</span></div>` : ''}
-      <div class="card"><div class="card-pad" style="padding-bottom:4px"><h2>سفارش‌های فعال</h2></div>${ordersTable(os, { noOwner: true, empty: 'سفارش فعالی ندارد' })}</div>`;
+      ${u.phone ? `<div class="notice" style="margin-bottom:16px">تماس: <span class="num">${esc(u.phone)}</span></div>` : ''}
+      <div class="card"><div class="card-pad" style="padding-bottom:0"><h2>سفارش‌های فعال</h2></div>${ordersTable(os, { noOwner: true, empty: 'سفارش فعالی ندارد.' })}</div>`;
   }
 
-  /* ---------- rates ---------- */
+  /* ---------- rates page ---------- */
   function lineChart(points, { w = 640, h = 220, small = false } = {}) {
-    if (points.length < 2) return '<p class="muted small">داده کافی برای نمودار نیست</p>';
+    if (points.length < 2) return '<p class="muted small">داده کافی برای نمودار وجود ندارد.</p>';
     const vals = points.flatMap((p) => [p.buy, p.sell]);
     let lo = Math.min(...vals), hi = Math.max(...vals);
     if (lo === hi) { lo *= 0.99; hi *= 1.01; }
@@ -898,16 +971,14 @@
     const X = (t) => padL + ((t - t0) / (t1 - t0 || 1)) * (w - padL - (small ? 2 : 60));
     const Y = (v) => pad + (1 - (v - lo) / (hi - lo)) * (h - pad * 2);
     const path = (k) => points.map((p, i) => `${i ? 'L' : 'M'}${X(p.at).toFixed(1)},${Y(p[k]).toFixed(1)}`).join('');
-    if (small) return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="height:${h}px;overflow:visible"><path d="${path('sell')}" fill="none" stroke="#3b82f6" stroke-width="2" vector-effect="non-scaling-stroke" style="filter:drop-shadow(0 0 4px rgba(59,130,246,.7))"/></svg>`;
-    const ticks = [lo, (lo + hi) / 2, hi];
-    const area = `${path('sell')}L${X(t1)},${h - pad}L${X(t0)},${h - pad}Z`;
+    if (small) return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="height:${h}px;overflow:visible"><path d="${path('sell')}" fill="none" stroke="#3b82f6" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>`;
     const xl = [points[0], points[Math.floor(points.length / 2)], points[points.length - 1]];
-    return `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="نمودار تغییرات نرخ" style="direction:ltr">
+    return `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="نمودار نرخ" style="direction:ltr">
       <defs><linearGradient id="ga" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#3b82f6" stop-opacity=".28"/><stop offset="1" stop-color="#3b82f6" stop-opacity="0"/></linearGradient></defs>
-      ${ticks.map((v) => `<line x1="${padL}" x2="${w - 60}" y1="${Y(v)}" y2="${Y(v)}" stroke="rgba(127,127,127,.18)" stroke-dasharray="3 4"/><text x="${w - 54}" y="${Y(v) + 4}" font-size="11" fill="#7a879c">${fmt(v, 4)}</text>`).join('')}
-      <path d="${area}" fill="url(#ga)"/>
-      <path d="${path('buy')}" fill="none" stroke="#2fd389" stroke-width="2" style="filter:drop-shadow(0 0 4px rgba(47,211,137,.6))"/>
-      <path d="${path('sell')}" fill="none" stroke="#3b82f6" stroke-width="2.4" style="filter:drop-shadow(0 0 5px rgba(59,130,246,.7))"/>
+      ${[lo, (lo + hi) / 2, hi].map((v) => `<line x1="${padL}" x2="${w - 60}" y1="${Y(v)}" y2="${Y(v)}" stroke="rgba(127,127,127,.18)" stroke-dasharray="3 4"/><text x="${w - 54}" y="${Y(v) + 4}" font-size="11" fill="#7a879c">${fmt(v, 4)}</text>`).join('')}
+      <path d="${path('sell')}L${X(t1)},${h - pad}L${X(t0)},${h - pad}Z" fill="url(#ga)"/>
+      <path d="${path('buy')}" fill="none" stroke="#2fd389" stroke-width="2"/>
+      <path d="${path('sell')}" fill="none" stroke="#3b82f6" stroke-width="2.4"/>
       ${xl.map((p) => `<text x="${X(p.at)}" y="${h - 6}" font-size="11" fill="#7a879c" text-anchor="middle">${dayFmt.format(new Date(p.at))}</text>`).join('')}
     </svg>`;
   }
@@ -916,202 +987,281 @@
     if (!ui.rateAsset && rated.length) ui.rateAsset = rated[0].a.id;
     const sel = rated.find((x) => x.a.id === ui.rateAsset) || rated[0];
     const hist = sel ? view.rateHistory.filter((h) => h.assetId === sel.a.id) : [];
-    const book = bookSummary(view.orders);
-    return `<div class="page-head"><div><h1>نرخ‌های بازار</h1><p>نرخ عمومی بازار که توسط مدیر ثبت می‌شود — جدا از نرخ‌های پیشنهادی اعضا.</p></div>${isAdmin() ? '<a class="btn" href="#admin-rates">ثبت نرخ جدید</a>' : ''}</div>
-    <div class="grid g4" style="margin-bottom:18px">
-      ${rated.map(({ r, a }) => {
-        const mid = (r.buy + r.sell) / 2, ch = r.prevMid ? ((mid - r.prevMid) / r.prevMid) * 100 : 0;
-        const b = book.find((x) => x.a.id === a.id);
-        return `<div class="card rate-card sheen ${sel && sel.a.id === a.id ? 'on' : ''}" data-act="rate-pick" data-id="${a.id}">
-          <div class="row">${assetChip(a)}<span class="spacer"></span><span class="chg num small ${ch >= 0 ? 'up' : 'down'}">${ch >= 0 ? '▲' : '▼'} ${Math.abs(ch).toFixed(2)}%</span></div>
-          <div class="rates"><div><span>خرید</span><b class="num">${fmt(r.buy)}</b></div><div><span>فروش</span><b class="num">${fmt(r.sell)}</b></div></div>
-          <div class="chart">${lineChart(view.rateHistory.filter((h) => h.assetId === a.id).slice(-20), { w: 200, h: 34, small: true })}</div>
-          <div class="row small muted" style="justify-content:space-between"><span>${esc(r.currency)} · ${ago(r.updatedAt)}</span>${b ? `<span>${b.n} پیشنهاد عضو</span>` : ''}</div>
-        </div>`;
-      }).join('')}
-    </div>
-    ${sel ? `<div class="split"><div class="card card-pad"><div class="row"><h2 style="margin:0">نمودار تغییرات ${esc(sel.a.name)}</h2><span class="spacer"></span><span class="small"><span style="color:var(--buy)">━ خرید</span> &nbsp; <span style="color:var(--blue-2)">━ فروش</span></span></div><div class="chart" style="margin-top:10px">${lineChart(hist.slice(-60))}</div></div>
-      <aside class="card card-pad"><h3>جزئیات</h3><dl class="kv"><dt>نرخ خرید</dt><dd class="num">${fmt(sel.r.buy)} ${esc(sel.r.currency)}</dd><dt>نرخ فروش</dt><dd class="num">${fmt(sel.r.sell)} ${esc(sel.r.currency)}</dd><dt>آخرین به‌روزرسانی</dt><dd>${fmtDate(sel.r.updatedAt)}</dd>
-        ${(() => { const b = book.find((x) => x.a.id === sel.a.id); return b ? `<dt>بهترین پیشنهاد خرید اعضا</dt><dd class="num" style="color:var(--buy)">${b.bid != null ? fmt(b.bid) : '—'}</dd><dt>بهترین پیشنهاد فروش اعضا</dt><dd class="num" style="color:var(--sell)">${b.ask != null ? fmt(b.ask) : '—'}</dd>` : ''; })()}</dl>
-        <button class="btn btn-block" style="margin-top:14px" data-act="filter-asset" data-id="${sel.a.id}">مشاهده پیشنهادهای ${esc(sel.a.name)} در بازار</button></aside></div>` : emptyBox('نرخی ثبت نشده است')}`;
+    const book = bookSummary();
+    const b = sel ? book.find((x) => x.a.id === sel.a.id) : null;
+    return `${officialBoard()}
+    ${sel ? `<div class="split" style="margin-top:24px"><div class="card card-pad"><div class="row"><h2 style="margin:0">روند نرخ ${esc(sel.a.name)}</h2><span class="spacer"></span><span class="small"><span style="color:var(--buy)">━ خرید</span> &nbsp; <span style="color:var(--blue-2)">━ فروش</span></span></div><div class="chart" style="margin-top:10px">${lineChart(hist.slice(-60))}</div></div>
+      <aside class="card card-pad"><h3>${esc(sel.a.name)}</h3><dl class="kv"><dt>خرید رسمی</dt><dd class="num">${fmt(sel.r.buy)}</dd><dt>فروش رسمی</dt><dd class="num">${fmt(sel.r.sell)}</dd><dt>به‌روزرسانی</dt><dd>${fmtDate(sel.r.updatedAt)}</dd>
+        ${b ? `<dt>بالاترین پیشنهاد خرید اعضا</dt><dd class="num" style="color:var(--buy)">${b.bid != null ? fmt(b.bid) : '—'}</dd><dt>پایین‌ترین پیشنهاد فروش اعضا</dt><dd class="num" style="color:var(--sell)">${b.ask != null ? fmt(b.ask) : '—'}</dd>` : ''}</dl>
+        <button class="btn btn-block" style="margin-top:14px" data-act="filter-asset" data-id="${sel.a.id}">پیشنهادهای ${esc(sel.a.name)} در بازار</button></aside></div>` : ''}`;
+  }
+
+  /* ---------- static pages ---------- */
+  function pageAbout() {
+    return `${pageHead('درباره سامانه', '')}<div class="card card-pad stack">
+      <p>سامانه معاملات سرای شهزاده کابل بستر رسمی ثبت پیشنهادهای خرید و فروش ارز، طلا و نقره میان صرافان، زرگران و تاجران تأییدشده است.</p>
+      <dl class="kv"><dt>نرخ رسمی</dt><dd>توسط مدیریت سرای شهزاده تعیین و منتشر می‌شود.</dd>
+        <dt>پیشنهادهای اعضا</dt><dd>هر عضو تأییدشده نرخ پیشنهادی خود را ثبت می‌کند.</dd>
+        <dt>عضویت</dt><dd>پس از بررسی مشخصات و تأیید مدیریت فعال می‌شود.</dd>
+        <dt>تسویه</dt><dd>پرداخت و تحویل خارج از سامانه و مستقیماً میان طرفین انجام می‌شود.</dd></dl></div>`;
+  }
+  function pageRules() {
+    const rules = ['عضویت فقط با مشخصات واقعی و قابل تأیید مجاز است.', 'ثبت سفارش غیرواقعی یا با هدف اثرگذاری بر نرخ بازار ممنوع است و موجب مسدودی حساب می‌شود.',
+      'صاحب سفارش موظف است به درخواست‌ها پاسخ دهد و پس از تأیید، معامله را مطابق شرایط ثبت‌شده انجام دهد.', 'طرفین معامله پس از تحویل و تسویه، تکمیل معامله را در سامانه تأیید می‌کنند.',
+      'مسئولیت پرداخت، تحویل و بررسی هویت طرف مقابل بر عهده طرفین معامله است.', 'گزارش تخلف از طریق صفحه معامله یا پروفایل عضو ثبت و توسط مدیریت بررسی می‌شود.',
+      'همه عملیات در سامانه ثبت و نگهداری می‌شود و قابل حذف یا تغییر نیست.'];
+    return `${pageHead('قوانین و مقررات', '')}<div class="card card-pad"><ol class="rules">${rules.map((r) => `<li>${r}</li>`).join('')}</ol></div>`;
   }
 
   /* ---------- auth ---------- */
   function pageLogin() {
-    if (me()) return gate(`شما با حساب «${esc(me().company)}» وارد شده‌اید.`, '<a class="btn btn-primary" href="#dashboard">رفتن به داشبورد</a>');
+    if (me()) return gate(`با حساب «${esc(me().company)}» وارد شده‌اید.`, '<a class="btn btn-primary" href="#dashboard">داشبورد</a>');
     return `<div class="auth-wrap"><form class="card card-pad stack" data-form="login">
-      <h1 style="margin:0;font-size:22px">ورود به حساب</h1><p class="muted" style="margin:0">با شماره تماس و رمز عبور وارد شوید.</p>
+      <h1 style="margin:0;font-size:22px">ورود</h1>
       <label class="field"><span>شماره تماس</span><input class="input num" name="phone" inputmode="tel" placeholder="07xxxxxxxx" required autocomplete="username"></label>
       <label class="field"><span>رمز عبور</span><input class="input" type="password" name="password" required autocomplete="current-password"></label>
       <div class="form-error hidden"></div>
       <button class="btn btn-primary btn-lg">ورود</button>
-      <p class="small muted" style="margin:0;text-align:center">حساب ندارید؟ <a href="#register">ثبت‌نام کنید</a></p>
-      <div class="notice small">حساب‌های نمونه برای آزمایش: <span class="num">0700000001</span> تا <span class="num">0700000005</span> — رمز همه <span class="num">123456</span></div>
-    </form></div>`;
-  }
-  function pageReview(id) {
-    const u = view.admin.users.find((x) => x.id === id);
-    if (!u) return gate('این کاربر پیدا نشد.');
-    const isSelf = u.id === me().id;
-    const row = (k, v, cls = '') => `<dt>${k}</dt><dd class="${cls}">${v || '<span class="muted">—</span>'}</dd>`;
-    const waLink = (ph) => ph ? `<a class="badge ok" href="https://wa.me/${esc(ph.replace(/^0/, '93').replace(/\D/g, ''))}" target="_blank" rel="noopener">${ICON.wa} <span class="num">${esc(ph)}</span></a>` : '';
-    const orders = view.orders.filter((o) => o.userId === u.id).length, deals = view.deals.filter((d) => d.ownerId === u.id || d.requesterId === u.id).length;
-    return `<a class="btn btn-sm" href="#admin-users" style="margin-bottom:16px">→ بازگشت به کاربران</a>
-    <div class="page-head"><div><h1>${esc(u.company)}</h1><p>${userBadge(u.status)} · درخواست ${fmtDate(u.createdAt)}${u.resubmittedAt ? ` · ارسال دوباره ${ago(u.resubmittedAt)}` : ''}</p></div></div>
-    <div class="split">
-      <div class="stack">
-        <div class="card card-pad"><h3>هویت و تماس</h3><dl class="kv">
-          ${row('نام و نام خانوادگی', esc(u.name))}${row('نام صرافی / شرکت', esc(u.company))}${row('نوع فعالیت', E.ACTIVITIES[u.activity])}
-          ${row('شماره تماس', `<span class="num">${esc(u.phone)}</span>`)}${row('واتس‌اپ', waLink(u.whatsapp))}
-        </dl></div>
-        <div class="card card-pad"><h3>محل و سابقه کار</h3><dl class="kv">
-          ${row('ولایت', esc(u.province))}${row('شهر / ولسوالی', esc(u.city))}${row('آدرس دفتر / دکان', esc(u.address))}${row('سابقه کار', esc(u.experience))}
-          ${row('ضامن / معرف', esc(u.guarantorName))}${row('تماس ضامن', u.guarantorPhone ? `<span class="num">${esc(u.guarantorPhone)}</span>` : '')}
-        </dl>${u.about ? `<p class="small" style="margin:14px 0 0">💬 ${esc(u.about)}</p>` : ''}</div>
-        ${u.statusReason ? `<div class="notice warn">آخرین دلیل ثبت‌شده: ${esc(u.statusReason)}</div>` : ''}
-      </div>
-      <aside class="stack">
-        <div class="card card-pad glow ${u.status === 'pending' ? 'g-warm' : ''}"><h3>تصمیم مدیریت</h3>
-          ${isSelf ? '<p class="muted small">این حساب خود شماست.</p>' : `<div class="stack">
-            ${u.status !== 'approved' ? `<button class="btn btn-buy btn-block btn-lg" data-act="user-status" data-id="${u.id}" data-v="approved">✓ تأیید عضویت</button>` : ''}
-            ${u.status === 'pending' ? `<button class="btn btn-sell btn-block" data-act="reject-user" data-id="${u.id}">✕ رد درخواست</button>` : ''}
-            ${u.status !== 'blocked' ? `<button class="btn btn-block" data-act="block-user" data-id="${u.id}">⛔ مسدودکردن</button>` : ''}
-            <button class="btn btn-block btn-sm" data-act="user-role" data-id="${u.id}" data-v="${u.role === 'admin' ? 'member' : 'admin'}">${u.role === 'admin' ? 'حذف دسترسی مدیر' : 'دادن دسترسی مدیر'}</button>
-          </div><p class="muted small" style="margin:12px 0 0">نتیجه تصمیم شما فوراً به‌صورت اعلان برای این شخص ارسال می‌شود.</p>`}
-        </div>
-        <div class="card card-pad"><h3>فعالیت</h3><dl class="kv">${row('سفارش‌ها', `<span class="num">${orders}</span>`)}${row('معاملات', `<span class="num">${deals}</span>`)}${row('آخرین بررسی', u.reviewedAt ? fmtDate(u.reviewedAt) : '')}</dl></div>
-      </aside>
-    </div>`;
-  }
-  const adminBack = () => '<a class="btn btn-sm" href="#admin" style="margin-bottom:16px">→ بازگشت به پنل</a>';
-  function pageAdminLogin() {
-    const m = me();
-    return `<div class="auth-wrap"><form class="card card-pad stack glow" data-form="admin-login">
-      <div style="display:flex;justify-content:center"><span class="asset-ico" style="width:64px;height:64px">${ICON.nAdmin.replace('<svg ', '<svg width="28" height="28" ')}</span></div>
-      <h1 style="margin:0;font-size:21px;text-align:center">ورود مدیر</h1>
-      ${m ? `<div class="notice warn small">حساب «${esc(m.company)}» دسترسی مدیریت ندارد.</div>` : ''}
-      <label class="field"><span>شماره تماس</span><input class="input num" name="phone" inputmode="tel" required autocomplete="username"></label>
-      <label class="field"><span>رمز عبور</span><input class="input" type="password" name="password" required autocomplete="current-password"></label>
-      <div class="form-error hidden"></div>
-      <button class="btn btn-primary btn-lg">ورود به پنل</button>
+      <p class="small muted" style="margin:0;text-align:center">حساب ندارید؟ <a href="#register">درخواست عضویت</a></p>
+      ${backend.mode === 'local' ? '<div class="notice small">حساب‌های آزمایشی: <span class="num">0700000001</span> تا <span class="num">0700000005</span> — رمز <span class="num">123456</span></div>' : ''}
     </form></div>`;
   }
   function pageRegister() {
-    if (me()) return gate('شما وارد حساب خود شده‌اید.', '<a class="btn btn-primary" href="#dashboard">داشبورد</a>');
-    return `<div class="auth-wrap" style="max-width:560px"><form class="card card-pad stack" data-form="register">
-      <h1 style="margin:0;font-size:22px">عضویت در بازار سرای شهزاده</h1><p class="muted" style="margin:0">پس از ثبت‌نام، حساب شما توسط مدیر بررسی و تأیید می‌شود.</p>
+    if (me()) return gate('وارد حساب خود شده‌اید.', '<a class="btn btn-primary" href="#dashboard">داشبورد</a>');
+    return `<div class="auth-wrap" style="max-width:600px"><form class="card card-pad stack" data-form="register">
+      <h1 style="margin:0;font-size:22px">درخواست عضویت</h1>
+      <p class="muted" style="margin:0">حساب پس از بررسی مشخصات توسط مدیریت فعال می‌شود.</p>
       <div class="grid g2">
-        <label class="field"><span>نام و نام خانوادگی</span><input class="input" name="name" required></label>
-        <label class="field"><span>نام صرافی یا شرکت</span><input class="input" name="company" required></label>
+        <label class="field"><span>نام و تخلص</span><input class="input" name="name" required></label>
+        <label class="field"><span>نام صرافی / شرکت</span><input class="input" name="company" required></label>
         <label class="field"><span>شماره تماس</span><input class="input num" name="phone" inputmode="tel" placeholder="07xxxxxxxx" required></label>
         <label class="field"><span>شماره واتس‌اپ</span><input class="input num" name="whatsapp" inputmode="tel" placeholder="در صورت تفاوت"></label>
       </div>
       <label class="field"><span>نوع فعالیت</span><select class="input" name="activity" required><option value="">انتخاب کنید</option>${Object.entries(E.ACTIVITIES).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select></label>
       ${kycInputs()}
-      <div class="notice small">این مشخصات فقط برای مدیریت سرای شهزاده نمایش داده می‌شود تا هویت شما بررسی و حساب تأیید شود.</div>
-      <label class="field"><span>رمز عبور</span><input class="input" type="password" name="password" minlength="6" required autocomplete="new-password"></label>
+      <label class="field"><span>رمز عبور (حداقل ۸ حرف)</span><input class="input" type="password" name="password" minlength="8" required autocomplete="new-password"></label>
+      <label class="row small"><input type="checkbox" class="switch" name="agree" required> <span><a href="#rules" target="_blank">قوانین و مقررات</a> را می‌پذیرم.</span></label>
       <div class="form-error hidden"></div>
-      <button class="btn btn-primary btn-lg">ثبت‌نام</button>
-      <p class="small muted" style="margin:0;text-align:center">قبلاً عضو شده‌اید؟ <a href="#login">وارد شوید</a></p>
+      <button class="btn btn-primary btn-lg">ارسال درخواست</button>
+      <p class="small muted" style="margin:0;text-align:center">عضو هستید؟ <a href="#login">ورود</a></p>
     </form></div>`;
   }
 
-  /* ---------- admin ---------- */
+  /* =========================================================
+     Admin panel
+     ========================================================= */
+  const adminBack = () => '<a class="btn btn-sm" href="#admin" style="margin-bottom:16px">→ صفحه اصلی پنل</a>';
+  function pageAdminLogin() {
+    const L = ui.adminLogin, m = me();
+    return `<div class="auth-wrap"><form class="card card-pad stack glow" data-form="admin-login">
+      <div style="display:flex;justify-content:center"><span class="asset-ico" style="width:64px;height:64px">${ICON.shield}</span></div>
+      <h1 style="margin:0;font-size:21px;text-align:center">ورود مدیر</h1>
+      ${m && !isAdmin() ? '<div class="notice warn small">این حساب دسترسی مدیریت ندارد.</div>' : ''}
+      ${L.need2fa ? `<p class="muted small" style="margin:0;text-align:center">کد ۶ رقمی برنامه Google Authenticator را وارد کنید.</p>
+        <label class="field"><span>کد تأیید</span><input class="input num" name="code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" required style="text-align:center;font-size:22px;letter-spacing:6px"></label>`
+      : `<label class="field"><span>شماره تماس</span><input class="input num" name="phone" inputmode="tel" required autocomplete="username"></label>
+        <label class="field"><span>رمز عبور</span><input class="input" type="password" name="password" required autocomplete="current-password"></label>`}
+      <div class="form-error hidden"></div>
+      <button class="btn btn-primary btn-lg">${L.need2fa ? 'تأیید' : 'ورود'}</button>
+      ${L.need2fa ? '<button type="button" class="btn btn-ghost btn-sm" data-act="admin-login-reset">بازگشت</button>' : ''}
+    </form></div>`;
+  }
+
+  const MODULES = [
+    ['members', 'اعضا و ثبت‌نام‌ها', 'بررسی و تأیید درخواست‌های عضویت، جستجوی اعضا، مسدودسازی', ICON.users],
+    ['rates', 'نرخ رسمی بازار', 'ثبت و اصلاح نرخ رسمی که در صفحه اصلی منتشر می‌شود', ICON.rate],
+    ['orders', 'سفارش‌ها', 'مشاهده و بستن سفارش‌های ثبت‌شده در بازار', ICON.list],
+    ['deals', 'معاملات', 'پیگیری معاملات میان اعضا و لغو در صورت تخلف', ICON.deal],
+    ['reports', 'گزارش‌های تخلف', 'بررسی شکایت‌های ثبت‌شده توسط اعضا', ICON.flag],
+    ['notify', 'اطلاعیه رسمی', 'ارسال اطلاعیه به همه اعضای تأییدشده', ICON.megaphone],
+    ['assets', 'ارزها و دارایی‌ها', 'افزودن، ویرایش یا غیرفعال‌سازی دارایی‌های قابل معامله', ICON.coins],
+    ['stats', 'آمار', 'آمار عضویت، سفارش و معامله به تفکیک دوره', ICON.chart],
+    ['security', 'امنیت حساب مدیر', 'تأیید دومرحله‌ای و تغییر رمز عبور', ICON.lock],
+    ['audit', 'سابقه عملیات', 'ثبت غیرقابل‌تغییر همه عملیات سامانه', ICON.history],
+  ];
+  function moduleHead(key, extra = '') {
+    const m = MODULES.find((x) => x[0] === key);
+    return `${adminBack()}${pageHead(m[1], m[2], extra)}`;
+  }
+
   function pageAdmin(tab) {
     const A = view.admin;
-    const pendingUsers = A.users.filter((u) => u.status === 'pending').length;
-    const openReports = A.reports.filter((r) => r.status === 'open').length;
-    const tabs = [['overview', 'گزارش‌ها'], ['users', 'کاربران', pendingUsers], ['orders', 'سفارش‌ها'], ['deals', 'معاملات'], ['assets', 'دارایی‌ها'], ['rates', 'نرخ‌های عمومی'], ['reports', 'تخلفات', openReports], ['notify', 'اعلان عمومی'], ['audit', 'فعالیت‌ها']];
-    const tabBar = `<div class="tabs">${tabs.map(([k, l, c]) => `<a href="#admin${k === 'overview' ? '' : '-' + k}" class="${tab === k ? 'on' : ''}">${l}${c ? `<span class="count hot">${c}</span>` : ''}</a>`).join('')}</div>`;
-    let body = '';
-    if (tab === 'overview') {
-      const now = Date.now();
-      const periods = [['امروز', 864e5], ['۷ روز اخیر', 7 * 864e5], ['۳۰ روز اخیر', 30 * 864e5]];
-      const row = ([label, ms]) => {
-        const os = view.orders.filter((o) => now - o.createdAt <= ms);
-        const ds = view.deals.filter((d) => now - d.createdAt <= ms);
-        const done = view.deals.filter((d) => d.status === 'completed' && now - (d.completedAt || d.updatedAt) <= ms);
-        return `<tr><td class="cell-main" data-l=""><b>${label}</b></td><td data-l="سفارش جدید" class="num">${os.length}</td><td data-l="درخواست" class="num">${ds.length}</td><td data-l="تأییدشده" class="num">${ds.filter((d) => ['accepted', 'completed'].includes(d.status)).length}</td><td data-l="تکمیل‌شده" class="num">${done.length}</td></tr>`;
-      };
+    if (tab === 'home') {
+      const lastRate = view.rates.reduce((x, r) => Math.max(x, r.updatedAt || 0), 0);
+      const tasks = [];
+      if (A.counts.pending) tasks.push(`<a class="todo" href="#admin-members" style="color:inherit"><span class="todo-dot"></span><div style="flex:1"><b class="num">${A.counts.pending}</b> درخواست عضویت در انتظار بررسی</div><span class="btn btn-primary btn-sm">بررسی</span></a>`);
+      if (A.openReports) tasks.push(`<a class="todo" href="#admin-reports" style="color:inherit"><span class="todo-dot"></span><div style="flex:1"><b class="num">${A.openReports}</b> گزارش تخلف باز</div><span class="btn btn-sm">بررسی</span></a>`);
+      if (!lastRate || Date.now() - lastRate > 12 * 3600e3) tasks.push(`<a class="todo" href="#admin-rates" style="color:inherit"><span class="todo-dot"></span><div style="flex:1">نرخ رسمی بیش از ۱۲ ساعت است به‌روزرسانی نشده است.</div><span class="btn btn-sm">ثبت نرخ</span></a>`);
+      if (!me().totpEnabled) tasks.push(`<a class="todo" href="#admin-security" style="color:inherit"><span class="todo-dot"></span><div style="flex:1">تأیید دومرحله‌ای حساب مدیر فعال نیست.</div><span class="btn btn-sell btn-sm">فعال‌سازی</span></a>`);
+      const badge = { members: A.counts.pending, reports: A.openReports };
+      return `${pageHead('پنل مدیریت', `${longDate.format(new Date())} · ${esc(me().name)}`)}
+        <div class="grid g4" style="margin-bottom:22px">
+          <div class="card tile sheen"><span>اعضای تأییدشده</span><b class="num" data-count="${A.counts.approved}">${A.counts.approved}</b></div>
+          <div class="card tile sheen"><span>در انتظار بررسی</span><b class="num" style="color:var(--warn)" data-count="${A.counts.pending}">${A.counts.pending}</b></div>
+          <div class="card tile sheen"><span>سفارش فعال</span><b class="num" data-count="${view.stats.activeOrders}">${view.stats.activeOrders}</b></div>
+          <div class="card tile sheen"><span>معامله در حال اجرا</span><b class="num" style="color:var(--blue-2)" data-count="${view.stats.activeDeals}">${view.stats.activeDeals}</b></div>
+        </div>
+        <div class="card card-pad ${tasks.length ? 'glow g-warm' : ''}" style="margin-bottom:24px"><h2>کارهای امروز</h2>${tasks.length ? tasks.join('') : '<p class="muted" style="margin:0">مورد معوقی وجود ندارد.</p>'}</div>
+        <div class="modules">${MODULES.map(([k, t, d, ic]) => `<a class="card module sheen" href="#admin-${k}"><span class="module-ico">${ic}</span><span class="module-txt"><b>${t}</b><small>${d}</small></span>${badge[k] ? `<span class="count-badge">${badge[k]}</span>` : ''}</a>`).join('')}</div>`;
+    }
+    if (tab === 'members') return adminMembers();
+    if (tab === 'rates') {
+      return `${moduleHead('rates')}
+        <div class="notice" style="margin-bottom:18px">هر تغییر نرخ با رمز عبور مدیر تأیید می‌شود. تغییرات بیش از ۱۵٪ نیاز به تأیید جداگانه دارد. همه تغییرات در سابقه عملیات ثبت می‌شود.</div>
+        <div class="card"><div class="table-wrap"><table class="data responsive"><thead><tr><th>دارایی</th><th>خرید</th><th>فروش</th><th>آخرین تغییر</th><th></th></tr></thead><tbody>
+        ${view.assets.filter((a) => a.active).map((a) => { const r = view.rates.find((x) => x.assetId === a.id); return `<tr><td class="cell-main">${assetChip(a, `${esc(a.priceCurrency)} برای هر ${esc(a.unit)}`)}</td>
+          <td data-l="خرید" class="num"><b>${r ? fmt(r.buy) : '—'}</b></td><td data-l="فروش" class="num"><b>${r ? fmt(r.sell) : '—'}</b></td>
+          <td data-l="آخرین تغییر" class="small">${r ? fmtDate(r.updatedAt) : '—'}</td>
+          <td class="cell-act"><button class="btn btn-primary btn-sm" data-act="rate-edit" data-id="${a.id}">ثبت نرخ جدید</button></td></tr>`; }).join('')}
+        </tbody></table></div></div>`;
+    }
+    if (tab === 'orders') {
+      const os = view.orders.slice().sort((a, b) => b.createdAt - a.createdAt);
+      return `${moduleHead('orders')}<div class="card">${ordersTable(os, { empty: 'سفارشی وجود ندارد.' })}</div><p class="muted small">آخرین ${os.length} سفارش نمایش داده شده است.</p>`;
+    }
+    if (tab === 'deals') {
+      const ds = view.deals.slice().sort((a, b) => b.updatedAt - a.updatedAt);
+      return `${moduleHead('deals')}<div class="card">${ds.length ? dealsTable(ds) : emptyBox('معامله‌ای وجود ندارد.')}</div>`;
+    }
+    if (tab === 'reports') {
+      return `${moduleHead('reports')}<div class="card card-pad">${A.reports.length ? A.reports.map((r) => `<div class="req ${r.status === 'open' ? 'pending' : 'completed'}">
+        <div class="row"><b>علیه: ${nameLink(r.userId)}</b>${r.status === 'open' ? '<span class="badge warn">باز</span>' : '<span class="badge ok">رسیدگی شده</span>'}<span class="spacer"></span><span class="muted small">${fmtDate(r.createdAt)}</span></div>
+        <div class="small muted">گزارش‌دهنده: ${nameLink(r.reporterId)} ${r.dealId ? `· <a href="#deal-${r.dealId}">معامله #${r.dealId}</a>` : ''}</div>
+        <p style="margin:6px 0">${esc(r.reason)}</p>${r.note ? `<div class="small muted">یادداشت مدیریت: ${esc(r.note)}</div>` : ''}
+        ${r.status === 'open' ? `<div class="row"><button class="btn btn-sm" data-act="resolve-report" data-id="${r.id}">ثبت رسیدگی</button><a class="btn btn-sm" href="#admin-review-${r.userId}">پرونده عضو</a></div>` : ''}</div>`).join('') : emptyBox('گزارشی ثبت نشده است.')}</div>`;
+    }
+    if (tab === 'notify') {
+      return `${moduleHead('notify')}<form class="card card-pad stack" data-form="broadcast" style="max-width:680px">
+        <label class="field"><span>متن اطلاعیه</span><textarea class="input" name="text" maxlength="300" required></textarea></label>
+        <p class="muted small" style="margin:0">اطلاعیه برای ${N(A.counts.approved)} عضو تأییدشده ارسال می‌شود و قابل بازگشت نیست.</p>
+        <button class="btn btn-primary">ارسال اطلاعیه</button></form>`;
+    }
+    if (tab === 'assets') {
+      return `${moduleHead('assets')}<div class="split"><div class="card"><div class="table-wrap"><table class="data responsive"><thead><tr><th>دارایی</th><th>واحد مقدار</th><th>واحد قیمت</th><th>وضعیت</th><th></th></tr></thead><tbody>
+        ${view.assets.map((a) => `<tr><td class="cell-main">${assetChip(a)}</td><td data-l="واحد مقدار">${esc(a.unit)}</td><td data-l="واحد قیمت">${esc(a.priceCurrency)}</td><td data-l="وضعیت">${a.active ? '<span class="badge ok">فعال</span>' : '<span class="badge">غیرفعال</span>'}</td>
+          <td class="cell-act"><div class="row"><button class="btn btn-sm" data-act="asset-edit" data-id="${a.id}">ویرایش</button><button class="btn btn-sm" data-act="asset-toggle" data-id="${a.id}">${a.active ? 'غیرفعال' : 'فعال'}</button></div></td></tr>`).join('')}</tbody></table></div></div>
+        <form class="card card-pad stack" data-form="asset"><h3>افزودن دارایی</h3><input type="hidden" name="id">
+          <div class="grid g2"><label class="field"><span>کد (لاتین)</span><input class="input ltr" name="code" required></label><label class="field"><span>نام</span><input class="input" name="name" required></label>
+          <label class="field"><span>واحد مقدار</span><input class="input" name="unit" required></label><label class="field"><span>واحد قیمت</span><input class="input" name="priceCurrency" value="AFN" required></label></div>
+          <label class="field"><span>نوع</span><select class="input" name="kind"><option value="currency">ارز</option><option value="metal">فلز / کالا</option></select></label>
+          <button class="btn btn-primary">ذخیره</button></form></div>`;
+    }
+    if (tab === 'stats') {
       const vol = {};
       for (const d of view.deals.filter((x) => ['accepted', 'completed'].includes(x.status))) {
         const o = orderOf(d.orderId); if (!o) continue;
         const k = o.assetId; vol[k] = vol[k] || { a: asset(k), unit: o.unit, amt: 0, value: 0, cur: o.priceCurrency, n: 0 };
         vol[k].amt += d.acceptedAmount; vol[k].value += d.acceptedAmount * d.price; vol[k].n++;
       }
-      body = `<div class="grid g4" style="margin-bottom:18px">
-        <div class="card tile sheen"><span>کل کاربران</span><b class="num" data-count="${A.users.length}">${A.users.length}</b></div>
-        <div class="card tile sheen"><span>منتظر تأیید</span><b class="num" style="color:var(--warn)" data-count="${pendingUsers}">${pendingUsers}</b></div>
-        <div class="card tile sheen"><span>سفارش‌های فعال</span><b class="num" data-count="${view.stats.activeOrders}">${view.stats.activeOrders}</b></div>
-        <div class="card tile sheen"><span>معاملات تکمیل‌شده</span><b class="num" style="color:var(--buy)" data-count="${view.stats.completedDeals}">${view.stats.completedDeals}</b></div></div>
-        <div class="grid g2">
-          <div class="card"><div class="card-pad" style="padding-bottom:4px"><h2>گزارش دوره‌ای</h2></div><table class="data responsive"><thead><tr><th>دوره</th><th>سفارش جدید</th><th>درخواست</th><th>تأییدشده</th><th>تکمیل‌شده</th></tr></thead><tbody>${periods.map(row).join('')}</tbody></table></div>
-          <div class="card"><div class="card-pad" style="padding-bottom:4px"><h2>حجم معاملات تأییدشده به تفکیک دارایی</h2></div>${Object.values(vol).length ? `<table class="data responsive"><thead><tr><th>دارایی</th><th>تعداد</th><th>مقدار</th><th>ارزش</th></tr></thead><tbody>${Object.values(vol).map((v) => `<tr><td class="cell-main">${assetChip(v.a)}</td><td data-l="تعداد" class="num">${v.n}</td><td data-l="مقدار"><span class="num">${fmt(v.amt)}</span> ${esc(v.unit)}</td><td data-l="ارزش"><span class="num">${fmt(v.value, 0)}</span> ${esc(v.cur)}</td></tr>`).join('')}</tbody></table>` : emptyBox('هنوز معامله‌ای تأیید نشده')}</div>
-        </div>`;
-    } else if (tab === 'users') {
-      const f = ui.adminUserFilter;
-      const us = A.users.filter((u) => f === 'all' || u.status === f).sort((a, b) => (a.status === 'pending' ? -1 : 0) - (b.status === 'pending' ? -1 : 0) || b.createdAt - a.createdAt);
-      body = `<div class="card"><div class="row" style="padding:12px 14px;border-bottom:1px solid var(--line)"><div class="seg" style="overflow-x:auto;max-width:100%">${[['all', 'همه'], ['pending', 'منتظر بررسی'], ['approved', 'تأییدشده'], ['rejected', 'ردشده'], ['blocked', 'مسدود']].map(([k, l]) => `<button class="${f === k ? 'on' : ''}" data-act="user-filter" data-v="${k}">${l}</button>`).join('')}</div></div>
-        <div class="table-wrap"><table class="data responsive"><thead><tr><th>عضو</th><th>تماس</th><th>ولایت</th><th>فعالیت</th><th>وضعیت</th><th>ثبت‌نام</th><th>عملیات</th></tr></thead><tbody>
-        ${us.map((u) => `<tr class="clickable" data-href="#admin-review-${u.id}"><td class="cell-main"><b>${esc(u.company)}</b> ${u.role === 'admin' ? '<span class="badge blue">مدیر</span>' : ''}<div class="muted small">${esc(u.name)}</div></td>
-          <td data-l="تماس" class="num small">${esc(u.phone)}${u.whatsapp && u.whatsapp !== u.phone ? `<br>${esc(u.whatsapp)}` : ''}</td>
-          <td data-l="ولایت">${esc(u.province || '—')}</td>
-          <td data-l="فعالیت">${E.ACTIVITIES[u.activity] || ''}</td><td data-l="وضعیت">${userBadge(u.status)}</td>
-          <td data-l="ثبت‌نام" class="small">${ago(u.createdAt)}</td>
-          <td class="cell-act"><a class="btn ${u.status === 'pending' ? 'btn-primary' : ''} btn-sm" href="#admin-review-${u.id}">${u.status === 'pending' ? 'بررسی و تأیید' : 'جزئیات'}</a></td></tr>`).join('')}</tbody></table></div></div>`;
-    } else if (tab === 'orders') {
-      const os = view.orders.slice().sort((a, b) => b.createdAt - a.createdAt);
-      body = `<div class="card"><div class="table-wrap"><table class="data responsive"><thead><tr><th>سفارش</th><th>عضو</th><th>نوع</th><th>مقدار / باقی</th><th>نرخ</th><th>وضعیت</th><th></th></tr></thead><tbody>
-        ${os.map((o) => `<tr><td class="cell-main">${assetChip(asset(o.assetId), `#${o.id} · ${fmtDate(o.createdAt)}`)}</td><td data-l="عضو">${nameLink(o.userId)}</td><td data-l="نوع">${sideBadge(o.side)}</td>
-          <td data-l="مقدار / باقی"><span class="num">${fmt(o.amount)}</span> / <span class="num">${fmt(o.remaining)}</span> ${esc(o.unit)}</td><td data-l="نرخ" class="num">${fmt(o.price)}</td><td data-l="وضعیت">${orderBadge(o.status)}</td>
-          <td class="cell-act"><div class="row"><a class="btn btn-sm" href="#order-${o.id}">جزئیات</a>${['active', 'filled'].includes(o.status) ? `<button class="btn btn-sm" data-act="close-order" data-id="${o.id}">بستن</button>` : ''}</div></td></tr>`).join('')}
-        </tbody></table></div></div>`;
-    } else if (tab === 'deals') {
-      const ds = view.deals.slice().sort((a, b) => b.updatedAt - a.updatedAt);
-      body = `<div class="card">${ds.length ? `<div class="table-wrap"><table class="data responsive"><thead><tr><th>معامله</th><th>صاحب سفارش</th><th>درخواست‌دهنده</th><th>مقدار</th><th>نرخ</th><th>وضعیت</th><th></th></tr></thead><tbody>
-        ${ds.map((d) => { const o = orderOf(d.orderId) || {}; return `<tr class="clickable" data-href="#deal-${d.id}"><td class="cell-main">${assetChip(asset(o.assetId), `#${d.id} · ${fmtDate(d.createdAt)}`)}</td><td data-l="صاحب سفارش">${nameLink(d.ownerId)}</td><td data-l="درخواست‌دهنده">${nameLink(d.requesterId)}</td>
-          <td data-l="مقدار" class="num">${fmt(d.acceptedAmount || d.amount)}</td><td data-l="نرخ" class="num">${fmt(d.price)}</td><td data-l="وضعیت">${dealBadge(d.status)}</td><td class="cell-act"><a class="btn btn-sm" href="#deal-${d.id}">جزئیات</a></td></tr>`; }).join('')}
-        </tbody></table></div>` : emptyBox('معامله‌ای نیست')}</div>`;
-    } else if (tab === 'assets') {
-      body = `<div class="split"><div class="card"><table class="data responsive"><thead><tr><th>دارایی</th><th>واحد مقدار</th><th>واحد قیمت</th><th>وضعیت</th><th></th></tr></thead><tbody>
-        ${view.assets.map((a) => `<tr><td class="cell-main">${assetChip(a)}</td><td data-l="واحد مقدار">${esc(a.unit)}</td><td data-l="واحد قیمت">${esc(a.priceCurrency)}</td><td data-l="وضعیت">${a.active ? '<span class="badge ok">فعال</span>' : '<span class="badge">غیرفعال</span>'}</td>
-          <td class="cell-act"><div class="row"><button class="btn btn-sm" data-act="asset-edit" data-id="${a.id}">ویرایش</button><button class="btn btn-sm" data-act="asset-toggle" data-id="${a.id}">${a.active ? 'غیرفعال' : 'فعال'}</button></div></td></tr>`).join('')}</tbody></table></div>
-        <form class="card card-pad stack" data-form="asset"><h3>افزودن دارایی جدید</h3><input type="hidden" name="id">
-          <div class="grid g2"><label class="field"><span>کد (مثلاً SAR)</span><input class="input ltr" name="code" required></label><label class="field"><span>نام</span><input class="input" name="name" placeholder="ریال سعودی" required></label>
-          <label class="field"><span>واحد مقدار</span><input class="input" name="unit" placeholder="SAR / KG / OZ" required></label><label class="field"><span>واحد قیمت</span><input class="input" name="priceCurrency" value="AFN" required></label></div>
-          <label class="field"><span>نوع</span><select class="input" name="kind"><option value="currency">ارز</option><option value="metal">فلز / کالا</option></select></label>
-          <button class="btn btn-primary">ذخیره دارایی</button></form></div>`;
-    } else if (tab === 'rates') {
-      body = `<div class="card"><table class="data responsive"><thead><tr><th>دارایی</th><th>نرخ فعلی (خرید / فروش)</th><th>به‌روزرسانی</th><th>نرخ جدید</th></tr></thead><tbody>
-        ${view.assets.filter((a) => a.active).map((a) => { const r = view.rates.find((x) => x.assetId === a.id); return `<tr><td class="cell-main">${assetChip(a)}</td><td data-l="نرخ فعلی" class="num">${r ? `${fmt(r.buy)} / ${fmt(r.sell)}` : '—'}</td><td data-l="به‌روزرسانی" class="small">${r ? ago(r.updatedAt) : '—'}</td>
-          <td class="cell-act"><form class="row" data-form="rate" data-id="${a.id}"><input class="input num" name="buy" placeholder="خرید" value="${r ? r.buy : ''}" style="width:110px;padding:6px 10px" inputmode="decimal" required><input class="input num" name="sell" placeholder="فروش" value="${r ? r.sell : ''}" style="width:110px;padding:6px 10px" inputmode="decimal" required><button class="btn btn-primary btn-sm">ثبت</button></form></td></tr>`; }).join('')}
-        </tbody></table></div>`;
-    } else if (tab === 'reports') {
-      body = `<div class="card">${A.reports.length ? A.reports.slice().reverse().map((r) => `<div class="req ${r.status === 'open' ? 'pending' : 'completed'}" style="margin:12px">
-        <div class="row"><b>گزارش درباره ${nameLink(r.userId)}</b>${r.status === 'open' ? '<span class="badge warn">باز</span>' : '<span class="badge ok">رسیدگی‌شده</span>'}<span class="spacer"></span><span class="muted small">${fmtDate(r.createdAt)}</span></div>
-        <div class="small muted">گزارش‌دهنده: ${nameLink(r.reporterId)} ${r.dealId ? `· <a href="#deal-${r.dealId}">معامله #${r.dealId}</a>` : ''}</div>
-        <p style="margin:6px 0">${esc(r.reason)}</p>${r.note ? `<div class="small muted">یادداشت مدیر: ${esc(r.note)}</div>` : ''}
-        ${r.status === 'open' ? `<div class="row"><button class="btn btn-sm" data-act="resolve-report" data-id="${r.id}">رسیدگی شد</button><button class="btn btn-sell btn-sm" data-act="user-status" data-id="${r.userId}" data-v="blocked">مسدودکردن کاربر</button></div>` : ''}</div>`).join('') : emptyBox('گزارشی ثبت نشده است')}</div>`;
-    } else if (tab === 'notify') {
-      body = `<form class="card card-pad stack" data-form="broadcast" style="max-width:640px"><h3>ارسال اعلان به همه اعضای تأییدشده</h3>
-        <textarea class="input" name="text" placeholder="مثلاً: بازار روز جمعه تعطیل است." required></textarea><button class="btn btn-primary">ارسال اعلان</button></form>`;
-    } else if (tab === 'audit') {
-      body = `<div class="notice ${A.auditIntact ? '' : 'warn'}" style="margin-bottom:12px">${A.auditIntact ? '✓ زنجیره تاریخچه رویدادها سالم است؛ هیچ رویدادی تغییر نکرده یا حذف نشده است.' : '⚠ هشدار: زنجیره تاریخچه رویدادها ناسازگار است.'}</div>
-        <div class="card"><table class="data responsive"><thead><tr><th>زمان</th><th>کاربر</th><th>رویداد</th><th>جزئیات</th><th>هش</th></tr></thead><tbody>
-        ${A.audit.map((e) => `<tr><td data-l="زمان" class="small">${fmtDate(e.at)}</td><td data-l="کاربر">${e.actorId ? esc((user(e.actorId) || {}).company || '#' + e.actorId) : '<span class="muted">سیستم</span>'}</td><td class="cell-main ltr small" data-l="">${esc(e.type)} ${e.ref ? `<span class="muted">${esc(e.ref)}</span>` : ''}</td><td data-l="جزئیات" class="small">${esc(e.detail)}</td><td data-l="هش" class="ltr muted small">${esc(e.hash.slice(0, 10))}</td></tr>`).join('')}
-        </tbody></table></div>`;
+      return `${moduleHead('stats')}<div class="grid g2">
+        <div class="card"><div class="card-pad" style="padding-bottom:0"><h2>آمار دوره‌ای</h2></div><div class="table-wrap"><table class="data responsive"><thead><tr><th>دوره</th><th>عضویت</th><th>سفارش</th><th>درخواست</th><th>تکمیل</th></tr></thead><tbody>
+          ${A.period.map((p) => `<tr><td class="cell-main"><b>${p.label}</b></td><td data-l="عضویت" class="num">${p.users}</td><td data-l="سفارش" class="num">${p.orders}</td><td data-l="درخواست" class="num">${p.deals}</td><td data-l="تکمیل" class="num">${p.completed}</td></tr>`).join('')}</tbody></table></div></div>
+        <div class="card"><div class="card-pad" style="padding-bottom:0"><h2>حجم معاملات تأییدشده</h2><p class="muted small">بر اساس آخرین معاملات</p></div>${Object.values(vol).length ? `<div class="table-wrap"><table class="data responsive"><thead><tr><th>دارایی</th><th>تعداد</th><th>مقدار</th><th>ارزش</th></tr></thead><tbody>${Object.values(vol).map((v) => `<tr><td class="cell-main">${assetChip(v.a)}</td><td data-l="تعداد" class="num">${v.n}</td><td data-l="مقدار"><span class="num">${fmt(v.amt)}</span> ${esc(v.unit)}</td><td data-l="ارزش"><span class="num">${fmt(v.value, 0)}</span> ${esc(v.cur)}</td></tr>`).join('')}</tbody></table></div>` : emptyBox('معامله‌ای وجود ندارد.')}</div></div>`;
     }
-    return `<div class="page-head"><div><h1>پنل مدیریت</h1><p>کنترل کاربران، سفارش‌ها، دارایی‌ها و نرخ‌ها</p></div></div>${tabBar}${body}`;
+    if (tab === 'security') {
+      const m = me(), T = ui.totp;
+      return `${moduleHead('security')}<div class="split"><div class="stack">
+        <div class="card card-pad stack"><h2>تأیید دومرحله‌ای</h2>
+          ${backend.mode === 'local' ? '<div class="notice warn">در نسخه آزمایشی فعال نیست.</div>' : m.totpEnabled
+            ? `<div class="notice">فعال است. ورود به پنل نیازمند کد برنامه Google Authenticator است.</div>
+               <form class="stack" data-form="totp-disable"><div class="grid g2"><input class="input" type="password" name="password" placeholder="رمز عبور" required><input class="input num" name="code" placeholder="کد فعلی" inputmode="numeric" required></div><button class="btn btn-sell btn-sm">غیرفعال‌سازی</button></form>`
+            : T ? `<ol class="rules"><li>برنامه <b>Google Authenticator</b> را روی گوشی نصب کنید.</li><li>روی دکمه زیر بزنید یا کلید را در برنامه وارد کنید.</li><li>کد ۶ رقمی نمایش‌داده‌شده را همراه رمز عبور وارد کنید.</li></ol>
+                 <a class="btn btn-primary" href="${esc(T.uri)}">افزودن به Google Authenticator</a>
+                 <div class="secret num">${esc(T.secret.replace(/(.{4})/g, '$1 ').trim())}</div>
+                 <form class="stack" data-form="totp-enable"><div class="grid g2"><input class="input num" name="code" placeholder="کد ۶ رقمی" inputmode="numeric" maxlength="6" required><input class="input" type="password" name="password" placeholder="رمز عبور" required></div><button class="btn btn-buy">فعال‌سازی</button></form>`
+            : `<div class="notice warn">فعال نیست. برای جلوگیری از دسترسی غیرمجاز، فعال‌سازی ضروری است.</div><button class="btn btn-primary" data-act="totp-setup">شروع فعال‌سازی</button>`}
+        </div></div>
+        <form class="card card-pad stack" data-form="password"><h2>تغییر رمز عبور</h2>
+          <input class="input" type="password" name="current" placeholder="رمز فعلی" required autocomplete="current-password">
+          <input class="input" type="password" name="next" placeholder="رمز جدید (حداقل ۱۰ حرف، شامل حرف و عدد)" required autocomplete="new-password">
+          <p class="muted small" style="margin:0">پس از تغییر، نشست‌های دیگر این حساب بسته می‌شود.</p>
+          <button class="btn">تغییر رمز</button></form></div>`;
+    }
+    if (tab === 'audit') {
+      return `${moduleHead('audit')}<div class="notice ${A.auditIntact ? '' : 'warn'}" style="margin-bottom:14px">${A.auditIntact ? 'زنجیره سابقه عملیات سالم است؛ هیچ رکوردی تغییر نکرده یا حذف نشده است.' : 'هشدار: ناسازگاری در زنجیره سابقه عملیات.'}</div>
+        <div class="card"><div class="table-wrap"><table class="data responsive"><thead><tr><th>زمان</th><th>کاربر</th><th>عملیات</th><th>جزئیات</th></tr></thead><tbody>
+        ${A.audit.map((e) => `<tr><td data-l="زمان" class="small">${fmtDate(e.at)}</td><td data-l="کاربر">${e.actorId ? esc((user(e.actorId) || {}).company || '#' + e.actorId) : '<span class="muted">سیستم</span>'}</td><td class="cell-main ltr small">${esc(e.type)} <span class="muted">${esc(e.ref || '')}</span></td><td data-l="جزئیات" class="small">${esc(e.detail)}</td></tr>`).join('')}
+        </tbody></table></div></div>`;
+    }
+    return pageAdmin('home');
+  }
+
+  function adminMembers() {
+    const M = ui.members, A = view.admin;
+    const list = M.status === 'pending' && !M.q ? A.pending : M.list;
+    if (list === null && !M.loading) loadMembers();
+    const rows = list || [];
+    return `${moduleHead('members')}
+      <div class="card"><div class="row" style="padding:16px 18px;gap:12px">
+        <div class="seg" style="overflow-x:auto;max-width:100%">${[['pending', `در انتظار (${A.counts.pending})`], ['approved', 'تأییدشده'], ['rejected', 'ردشده'], ['blocked', 'مسدود'], ['', 'همه']].map(([k, l]) => `<button class="${M.status === k ? 'on' : ''}" data-act="member-filter" data-v="${k}">${l}</button>`).join('')}</div>
+        <form data-form="member-search" class="row" style="flex:1;min-width:220px"><input class="input" name="q" value="${esc(M.q)}" placeholder="جستجو: نام، صرافی، ولایت یا شماره" style="flex:1"><button class="btn btn-sm">جستجو</button></form>
+      </div>
+      ${M.loading && !list ? '<div class="empty">در حال دریافت…</div>' : rows.length ? `<div class="table-wrap"><table class="data responsive"><thead><tr><th>عضو</th><th>تماس</th><th>ولایت</th><th>فعالیت</th><th>وضعیت</th><th>ثبت‌نام</th><th></th></tr></thead><tbody>
+        ${rows.map((u) => `<tr class="clickable" data-href="#admin-review-${u.id}"><td class="cell-main"><b>${esc(u.company)}</b> ${u.role === 'admin' ? '<span class="badge blue">مدیر</span>' : ''}<div class="muted small">${esc(u.name)}</div></td>
+          <td data-l="تماس" class="num small">${esc(u.phone || '')}</td><td data-l="ولایت">${esc(u.province || '—')}</td><td data-l="فعالیت">${E.ACTIVITIES[u.activity] || ''}</td>
+          <td data-l="وضعیت">${userBadge(u.status)}</td><td data-l="ثبت‌نام" class="small">${ago(u.createdAt)}</td>
+          <td class="cell-act"><a class="btn ${u.status === 'pending' ? 'btn-primary' : ''} btn-sm" href="#admin-review-${u.id}">${u.status === 'pending' ? 'بررسی' : 'پرونده'}</a></td></tr>`).join('')}</tbody></table></div>
+        ${M.list && M.total > M.offset + M.list.length ? `<div style="padding:0 18px 18px"><button class="btn btn-block" data-act="member-more">نمایش بیشتر (${M.total - M.offset - M.list.length})</button></div>` : ''}` : emptyBox('موردی یافت نشد.')}
+      </div>`;
+  }
+  async function loadMembers(more) {
+    const M = ui.members; M.loading = true;
+    try {
+      const offset = more ? M.offset + (M.list || []).length : 0;
+      const r = await backend.adminUsers({ status: M.status, q: M.q, offset });
+      M.list = more ? [...(M.list || []), ...r.users] : r.users; M.total = r.total; if (!more) M.offset = 0;
+    } catch (e) { toast(e.message, true); M.list = []; }
+    M.loading = false; render();
+  }
+
+  function pageReview(id) {
+    let u = user(id);
+    if (!u || !('address' in u)) {
+      if (!ui.reviewLoading) { ui.reviewLoading = true; backend.adminUsers({ id }).then((r) => { ui.members.list = [...(ui.members.list || []).filter((x) => x.id !== id), ...r.users]; ui.reviewLoading = false; render(); }).catch((e) => { ui.reviewLoading = false; toast(e.message, true); }); }
+      return '<div class="empty">در حال دریافت پرونده…</div>';
+    }
+    const isSelf = u.id === me().id;
+    const row = (k, v) => `<dt>${k}</dt><dd>${v || '<span class="muted">—</span>'}</dd>`;
+    return `<a class="btn btn-sm" href="#admin-members" style="margin-bottom:16px">→ اعضا و ثبت‌نام‌ها</a>
+    ${pageHead(esc(u.company), `${userBadge(u.status)} · درخواست ${fmtDate(u.createdAt)}${u.resubmittedAt ? ` · ارسال مجدد ${ago(u.resubmittedAt)}` : ''}`)}
+    <div class="split">
+      <div class="stack">
+        <div class="card card-pad"><h3>هویت و تماس</h3><dl class="kv">
+          ${row('نام و تخلص', esc(u.name))}${row('نام صرافی / شرکت', esc(u.company))}${row('نوع فعالیت', E.ACTIVITIES[u.activity])}
+          ${row('شماره تماس', `<span class="num">${esc(u.phone)}</span>`)}${row('واتس‌اپ', u.whatsapp ? `<a class="badge ok" href="${waHref(u.whatsapp)}" target="_blank" rel="noopener">${ICON.wa} <span class="num">${esc(u.whatsapp)}</span></a>` : '')}
+        </dl></div>
+        <div class="card card-pad"><h3>محل و سابقه</h3><dl class="kv">
+          ${row('ولایت', esc(u.province))}${row('شهر / ولسوالی', esc(u.city))}${row('آدرس دفتر', esc(u.address))}${row('شماره جواز', esc(u.licenseNo))}${row('سابقه کار', esc(u.experience))}
+          ${row('ضامن / معرف', esc(u.guarantorName))}${row('تماس ضامن', u.guarantorPhone ? `<span class="num">${esc(u.guarantorPhone)}</span>` : '')}
+        </dl>${u.about ? `<p class="small" style="margin:14px 0 0">توضیحات: ${esc(u.about)}</p>` : ''}</div>
+        ${u.statusReason ? `<div class="notice warn">آخرین دلیل ثبت‌شده: ${esc(u.statusReason)}</div>` : ''}
+      </div>
+      <aside class="stack">
+        <div class="card card-pad glow ${u.status === 'pending' ? 'g-warm' : ''}"><h3>تصمیم مدیریت</h3>
+          ${isSelf ? '<p class="muted small">حساب خود شما.</p>' : `<div class="stack">
+            ${u.status !== 'approved' ? `<button class="btn btn-buy btn-block btn-lg" data-act="user-status" data-id="${u.id}" data-v="approved">تأیید عضویت</button>` : ''}
+            ${u.status === 'pending' ? `<button class="btn btn-sell btn-block" data-act="reject-user" data-id="${u.id}">رد درخواست</button>` : ''}
+            ${u.status !== 'blocked' ? `<button class="btn btn-block" data-act="block-user" data-id="${u.id}">مسدودسازی</button>` : ''}
+            ${u.status === 'approved' ? `<button class="btn btn-block btn-sm" data-act="user-role" data-id="${u.id}" data-v="${u.role === 'admin' ? 'member' : 'admin'}">${u.role === 'admin' ? 'لغو دسترسی مدیریت' : 'اعطای دسترسی مدیریت'}</button>` : ''}
+          </div><p class="muted small" style="margin:12px 0 0">نتیجه تصمیم بلافاصله به عضو اعلام می‌شود.</p>`}
+        </div>
+      </aside>
+    </div>`;
   }
 
   /* =========================================================
      Events
      ========================================================= */
-  function afterRender() {
-    if (route() === 'market') renderMarketTable();
-    if (route() === 'new') updateOrderAside();
+  function afterRender(r) {
+    if (r === 'market') renderMarketTable();
+    if (r === 'new') updateOrderAside();
   }
   const formData = (form) => Object.fromEntries(new FormData(form).entries());
+  async function logout() {
+    await backend.logout().catch(() => {});
+    ui.adminLogin = { need2fa: false }; ui.members.list = null; ui.totp = null;
+    await refresh(); location.hash = ADMIN_MODE ? '#admin' : '#home'; render(); toast('از حساب خارج شدید.');
+  }
 
   document.addEventListener('click', async (e) => {
     const t = e.target.closest('[data-act]');
@@ -1123,67 +1273,81 @@
     }
     const { act: a, id } = t.dataset;
     const nid = Number(id);
-    switch (a) {
-      case 'close-modal': closeModal(); break;
-      case 'toggle-menu': ui.menuOpen = !ui.menuOpen; render(); break;
-      case 'theme': {
-        const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
-        document.documentElement.dataset.theme = next; store.set('sarai-theme', next); render(); break;
+    try {
+      switch (a) {
+        case 'close-modal': closeModal(); pendingSensitive = null; break;
+        case 'toggle-notifs': ui.notifOpen = !ui.notifOpen; render(); break;
+        case 'read-all': await act('notifications.read', {}); break;
+        case 'open-notif':
+          ui.notifOpen = false; await backend.action('notifications.read', { id: nid }).catch(() => {}); await refresh();
+          if (t.dataset.link && (ADMIN_MODE === t.dataset.link.startsWith('#admin') || /^#(order|deal)-/.test(t.dataset.link))) location.hash = t.dataset.link;
+          render(); break;
+        case 'theme': {
+          const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+          document.documentElement.dataset.theme = next; store.set('sarai-theme', next); render(); break;
+        }
+        case 'logout': await logout(); break;
+        case 'demo-reset': LocalBackend.reset(); await refresh(); location.hash = '#home'; render(); toast('داده‌های آزمایشی بازنشانی شد.'); break;
+        case 'enable-push': {
+          const r = await Notification.requestPermission().catch(() => 'denied');
+          toast(r === 'granted' ? 'اعلان روی گوشی فعال شد.' : 'اجازه اعلان داده نشد.', r !== 'granted'); render(); break;
+        }
+        case 'request': openRequest(nid); break;
+        case 'fill-amt': { const f = t.closest('form'); f.amount.value = t.dataset.v; f.amount.dispatchEvent(new Event('input', { bubbles: true })); break; }
+        case 'side': ui.side = t.dataset.v; document.querySelectorAll('.side-toggle button').forEach((b) => b.classList.toggle('on', b.dataset.v === ui.side)); break;
+        case 'filter-asset': ui.filters = { ...ui.filters, asset: String(nid) }; location.hash = '#market'; render(); break;
+        case 'clear-filters': ui.filters = { asset: '', side: '', min: '', max: '', minAmount: '', q: '', sort: ui.filters.sort }; render(); break;
+        case 'rate-open': ui.rateAsset = nid; if (route() !== 'rates') location.hash = '#rates'; else render(); break;
+        case 'deal-filter': ui.dealFilter = t.dataset.v; render(); break;
+        case 'accept': {
+          const inp = document.querySelector(`[data-accept-amt="${nid}"]`);
+          await act('deal.accept', { dealId: nid, amount: inp ? inp.value : undefined }, 'درخواست تأیید شد.'); break;
+        }
+        case 'reject':
+          modal('رد درخواست', `<form data-form="reject" data-id="${nid}" class="stack"><label class="field"><span>دلیل (اختیاری)</span><input class="input" name="reason"></label><button class="btn btn-sell btn-block">رد درخواست</button></form>`); break;
+        case 'withdraw': await act('deal.withdraw', { dealId: nid }, 'درخواست لغو شد.'); break;
+        case 'complete':
+          modal('تأیید تکمیل معامله', `<form data-form="complete" data-id="${nid}" class="stack"><p style="margin:0">تأیید می‌کنم که تحویل و تسویه این معامله انجام شده است.</p><button class="btn btn-buy btn-block">تأیید تکمیل</button></form>`); break;
+        case 'cancel-deal':
+          modal('لغو معامله', `<form data-form="cancel-deal" data-id="${nid}" class="stack"><p class="muted" style="margin:0">مقدار تأییدشده به سفارش بازگردانده می‌شود.</p><label class="field"><span>دلیل لغو</span><input class="input" name="reason" required></label><button class="btn btn-sell btn-block">لغو معامله</button></form>`); break;
+        case 'close-order':
+          modal('بستن سفارش', `<form data-form="close-order" data-id="${nid}" class="stack"><p style="margin:0">سفارش #${nid} بسته می‌شود و درخواست‌های در انتظار آن رد خواهند شد. معاملات در حال اجرا ادامه می‌یابند.</p><button class="btn btn-sell btn-block">بستن سفارش</button></form>`); break;
+        case 'report':
+          modal('ثبت گزارش تخلف', `<form data-form="report" data-uid="${t.dataset.uid}" data-deal="${t.dataset.deal || ''}" class="stack"><label class="field"><span>شرح</span><textarea class="input" name="reason" required></textarea></label><button class="btn btn-sell btn-block">ارسال به مدیریت</button></form>`); break;
+        /* admin */
+        case 'admin-login-reset': ui.adminLogin = { need2fa: false }; render(); break;
+        case 'member-filter': ui.members = { ...ui.members, status: t.dataset.v, list: null, offset: 0 }; render(); break;
+        case 'member-more': loadMembers(true); break;
+        case 'user-status': await act('admin.user.setStatus', { userId: nid, status: t.dataset.v }, t.dataset.v === 'approved' ? 'عضویت تأیید و به عضو اعلام شد.' : 'وضعیت به‌روز شد.'); ui.members.list = null; break;
+        case 'reject-user':
+          modal('رد درخواست عضویت', `<form data-form="reject-user" data-id="${nid}" class="stack"><label class="field"><span>دلیل رد (به متقاضی اعلام می‌شود)</span><textarea class="input" name="reason" required></textarea></label><button class="btn btn-sell btn-block">رد درخواست</button></form>`); break;
+        case 'block-user':
+          modal('مسدودسازی حساب', `<form data-form="block-user" data-id="${nid}" class="stack"><label class="field"><span>دلیل</span><input class="input" name="reason" required></label><button class="btn btn-sell btn-block">مسدودسازی</button></form>`); break;
+        case 'user-role': sensitive('admin.user.setRole', { userId: nid, role: t.dataset.v }, 'نقش کاربر تغییر کرد.', t.dataset.v === 'admin' ? 'اعطای دسترسی کامل مدیریت به این عضو.' : 'لغو دسترسی مدیریت این عضو.'); break;
+        case 'rate-edit': {
+          const as = view.assets.find((x) => x.id === nid), r = view.rates.find((x) => x.assetId === nid);
+          modal(`نرخ رسمی ${esc(as.name)}`, `<form data-form="rate" data-id="${nid}" class="stack">
+            ${r ? `<div class="notice small">نرخ فعلی: خرید <b class="num">${fmt(r.buy)}</b> · فروش <b class="num">${fmt(r.sell)}</b></div>` : ''}
+            <div class="grid g2"><label class="field"><span>خرید</span><input class="input num" name="buy" inputmode="decimal" value="${r ? r.buy : ''}" required></label>
+            <label class="field"><span>فروش</span><input class="input num" name="sell" inputmode="decimal" value="${r ? r.sell : ''}" required></label></div>
+            <div id="rate-delta" class="small muted"></div>
+            <label class="field"><span>رمز عبور مدیر</span><input class="input" type="password" name="password" required autocomplete="current-password"></label>
+            <div class="form-error hidden"></div>
+            <button class="btn btn-primary btn-block">ثبت و انتشار</button></form>`);
+          break;
+        }
+        case 'asset-toggle': sensitive('admin.asset.toggle', { assetId: nid }, 'وضعیت دارایی تغییر کرد.'); break;
+        case 'asset-edit': {
+          const as = view.assets.find((x) => x.id === nid); const f = document.querySelector('[data-form="asset"]');
+          ['id', 'code', 'name', 'unit', 'priceCurrency', 'kind'].forEach((k) => { f[k].value = as[k]; });
+          f.querySelector('h3').textContent = `ویرایش ${as.name}`; f.code.focus(); break;
+        }
+        case 'resolve-report':
+          modal('ثبت رسیدگی', `<form data-form="resolve" data-id="${nid}" class="stack"><label class="field"><span>یادداشت مدیریت</span><input class="input" name="note"></label><button class="btn btn-primary btn-block">ثبت</button></form>`); break;
+        case 'totp-setup': ui.totp = await backend.totpSetup(); render(); break;
+        default: break;
       }
-      case 'toggle-notifs': ui.notifOpen = !ui.notifOpen; render(); break;
-      case 'read-all': await act('notifications.read', {}); break;
-      case 'open-notif': ui.notifOpen = false; await backend.action('notifications.read', { id: nid }).catch(() => {}); await refresh(); if (t.dataset.link && (ADMIN_MODE || !t.dataset.link.startsWith('#admin'))) location.hash = t.dataset.link; render(); break;
-      case 'logout':
-        await backend.logout(); await refresh();
-        if (ADMIN_MODE && backend.mode === 'local') { try { sessionStorage.removeItem('sarai-admin'); } catch { /* ignore */ } ADMIN_MODE = false; }
-        location.hash = ADMIN_MODE ? '#admin' : '#home'; render(); toast('از حساب خارج شدید'); break;
-      case 'demo-reset': LocalBackend.reset(); await refresh(); location.hash = '#home'; render(); toast('اطلاعات نمونه بازنشانی شد'); break;
-      case 'request': openRequest(nid); break;
-      case 'fill-amt': { const f = t.closest('form'); f.amount.value = t.dataset.v; f.amount.dispatchEvent(new Event('input', { bubbles: true })); break; }
-      case 'side': ui.side = t.dataset.v; document.querySelectorAll('.side-toggle button').forEach((b) => b.classList.toggle('on', b.dataset.v === ui.side)); break;
-      case 'filter-asset': ui.filters = { ...ui.filters, asset: String(nid) }; location.hash = '#market'; render(); break;
-      case 'clear-filters': ui.filters = { asset: '', side: '', min: '', max: '', minAmount: '', q: '', sort: ui.filters.sort }; render(); break;
-      case 'rate-pick': ui.rateAsset = nid; render(); break;
-      case 'accept': {
-        const inp = document.querySelector(`[data-accept-amt="${nid}"]`);
-        await act('deal.accept', { dealId: nid, amount: inp ? inp.value : undefined }, 'درخواست تأیید شد؛ ارتباط با طرف مقابل برقرار است').catch(() => {});
-        break;
-      }
-      case 'reject':
-        modal('رد درخواست', `<form data-form="reject" data-id="${nid}" class="stack"><label class="field"><span>دلیل (اختیاری)</span><input class="input" name="reason" placeholder="مثلاً: مقدار کافی نیست"></label><button class="btn btn-sell btn-block">رد درخواست</button></form>`);
-        break;
-      case 'withdraw': await act('deal.withdraw', { dealId: nid }, 'درخواست پس گرفته شد').catch(() => {}); break;
-      case 'complete': await act('deal.complete', { dealId: nid }, 'تکمیل معامله از طرف شما ثبت شد').catch(() => {}); break;
-      case 'cancel-deal':
-        modal('لغو معامله', `<form data-form="cancel-deal" data-id="${nid}" class="stack"><p class="muted" style="margin:0">با لغو معامله، مقدار تأییدشده به سفارش برمی‌گردد.</p><label class="field"><span>دلیل لغو</span><input class="input" name="reason" required></label><button class="btn btn-sell btn-block">لغو معامله</button></form>`);
-        break;
-      case 'close-order':
-        modal('بستن سفارش', `<form data-form="close-order" data-id="${nid}" class="stack"><p style="margin:0">سفارش #${nid} بسته می‌شود و درخواست‌های در انتظار آن رد خواهند شد. معاملات در حال انجام ادامه پیدا می‌کنند.</p><button class="btn btn-sell btn-block">بستن سفارش</button></form>`);
-        break;
-      case 'report':
-        modal('گزارش تخلف', `<form data-form="report" data-uid="${t.dataset.uid}" data-deal="${t.dataset.deal || ''}" class="stack"><label class="field"><span>شرح مشکل</span><textarea class="input" name="reason" required placeholder="چه اتفاقی افتاد؟"></textarea></label><button class="btn btn-sell btn-block">ارسال گزارش به مدیر</button></form>`);
-        break;
-      case 'user-filter': ui.adminUserFilter = t.dataset.v; render(); break;
-      case 'reject-user':
-        modal('رد درخواست عضویت', `<form data-form="reject-user" data-id="${nid}" class="stack"><label class="field"><span>دلیل رد (برای متقاضی ارسال می‌شود)</span><textarea class="input" name="reason" required placeholder="مثلاً: آدرس دکان ناقص است یا ضامن تأیید نشد"></textarea></label><button class="btn btn-sell btn-block">رد و ارسال اعلان</button></form>`);
-        break;
-      case 'block-user':
-        modal('مسدودکردن حساب', `<form data-form="block-user" data-id="${nid}" class="stack"><label class="field"><span>دلیل (اختیاری)</span><input class="input" name="reason"></label><button class="btn btn-sell btn-block">مسدود کن</button></form>`);
-        break;
-      case 'enable-push':
-        try { const r = await Notification.requestPermission(); toast(r === 'granted' ? 'اعلان روی گوشی فعال شد' : 'اجازه اعلان داده نشد', r !== 'granted'); } catch { toast('این مرورگر اعلان را پشتیبانی نمی‌کند', true); }
-        render(); break;
-      case 'user-status': await act('admin.user.setStatus', { userId: nid, status: t.dataset.v }, t.dataset.v === 'approved' ? 'عضویت تأیید شد و به شخص اعلام شد' : 'وضعیت کاربر به‌روز شد').catch(() => {}); break;
-      case 'user-role': await act('admin.user.setRole', { userId: nid, role: t.dataset.v }, 'نقش کاربر تغییر کرد').catch(() => {}); break;
-      case 'asset-toggle': await act('admin.asset.toggle', { assetId: nid }).catch(() => {}); break;
-      case 'asset-edit': {
-        const as = asset(nid); const f = document.querySelector('[data-form="asset"]');
-        ['id', 'code', 'name', 'unit', 'priceCurrency', 'kind'].forEach((k) => { f[k].value = as[k]; });
-        f.querySelector('h3').textContent = `ویرایش ${as.name}`; f.code.focus(); break;
-      }
-      case 'resolve-report': await act('admin.report.resolve', { reportId: nid }, 'گزارش بسته شد').catch(() => {}); break;
-      default: break;
-    }
+    } catch (err) { if (err && err.message) toast(err.message, true); }
   });
 
   document.addEventListener('submit', async (e) => {
@@ -1194,34 +1358,47 @@
     const showErr = (msg) => { const el = f.querySelector('.form-error'); if (el) { el.textContent = msg; el.classList.remove('hidden'); } else toast(msg, true); };
     try {
       switch (f.dataset.form) {
+        case 'login': await backend.login(d); await refresh(); location.hash = approved() ? '#dashboard' : '#profile'; render(); toast('ورود موفق.'); break;
+        case 'register': await backend.register(d); await refresh(); location.hash = '#profile'; render(); toast('درخواست عضویت ثبت شد.'); break;
         case 'admin-login': {
-          await backend.login(d); await refresh();
-          if (!isAdmin()) { await backend.logout(); await refresh(); throw new Error('این حساب دسترسی مدیریت ندارد'); }
-          location.hash = '#admin'; render(); toast('به پنل مدیریت خوش آمدید'); break;
+          const L = ui.adminLogin;
+          const body = L.need2fa ? { phone: L.phone, password: L.password, code: d.code } : { phone: d.phone, password: d.password };
+          const r = await backend.login(body);
+          if (r && r.need2fa) { ui.adminLogin = { need2fa: true, phone: d.phone, password: d.password }; render(); break; }
+          ui.adminLogin = { need2fa: false };
+          await refresh(); location.hash = '#admin'; render(); break;
         }
-        case 'login': await backend.login(d); await refresh(); location.hash = '#dashboard'; render(); toast(`خوش آمدید، ${view.me.company}`); break;
-        case 'register': await backend.register(d); await refresh(); location.hash = view.me.status === 'approved' ? '#dashboard' : '#profile'; render(); toast('ثبت‌نام انجام شد'); break;
         case 'order': {
           const r = await backend.action('order.create', { ...d, side: ui.side });
-          await refresh(); location.hash = `#order-${r.orderId}`; render(); toast('سفارش شما در بازار منتشر شد'); break;
+          await refresh(); location.hash = `#order-${r.orderId}`; render(); toast('سفارش ثبت و منتشر شد.'); break;
         }
         case 'request': {
           const r = await backend.action('deal.request', { orderId: id, amount: d.amount, note: d.note });
-          await refresh(); closeModal(); location.hash = `#deal-${r.dealId}`; render(); toast('درخواست ارسال شد؛ منتظر تأیید طرف مقابل باشید'); break;
+          await refresh(); closeModal(); location.hash = `#deal-${r.dealId}`; render(); toast('درخواست ارسال شد.'); break;
         }
-        case 'reject-user': await act('admin.user.setStatus', { userId: id, status: 'rejected', reason: d.reason }, 'درخواست رد شد و به متقاضی اعلام شد'); break;
-        case 'block-user': await act('admin.user.setStatus', { userId: id, status: 'blocked', reason: d.reason }, 'حساب مسدود شد'); break;
-        case 'resubmit': await act('account.resubmit', d, 'مشخصات دوباره برای بررسی ارسال شد'); break;
-        case 'reject': await act('deal.reject', { dealId: id, reason: d.reason }, 'درخواست رد شد'); break;
-        case 'cancel-deal': await act('deal.cancel', { dealId: id, reason: d.reason }, 'معامله لغو شد'); break;
-        case 'close-order': await act('order.cancel', { orderId: id }, 'سفارش بسته شد'); break;
-        case 'message': await act('message.send', { dealId: id, text: d.text }); document.querySelector('[data-form="message"] input')?.focus(); break;
-        case 'report': await act('report.create', { userId: Number(f.dataset.uid), dealId: f.dataset.deal || null, reason: d.reason }, 'گزارش برای مدیر ارسال شد'); break;
-        case 'profile': await act('profile.update', { ...d, showContact: !!f.showContact.checked }, 'پروفایل ذخیره شد'); break;
-        case 'password': await backend.changePassword(d.current, d.next); f.reset(); toast('رمز عبور تغییر کرد'); break;
-        case 'asset': await act('admin.asset.save', { ...d, id: d.id ? Number(d.id) : undefined }, 'دارایی ذخیره شد'); break;
-        case 'rate': await act('admin.rate.set', { assetId: id, buy: d.buy, sell: d.sell }, 'نرخ ثبت شد'); break;
-        case 'broadcast': await act('admin.broadcast', d, 'اعلان برای همه اعضا ارسال شد'); break;
+        case 'reject': await act('deal.reject', { dealId: id, reason: d.reason }, 'درخواست رد شد.'); break;
+        case 'complete': await act('deal.complete', { dealId: id }, 'تکمیل معامله از طرف شما ثبت شد.'); break;
+        case 'cancel-deal': await act('deal.cancel', { dealId: id, reason: d.reason }, 'معامله لغو شد.'); break;
+        case 'close-order': await act('order.cancel', { orderId: id }, 'سفارش بسته شد.'); break;
+        case 'message': await act('message.send', { dealId: id, text: d.text }); { const i = document.querySelector('[data-form="message"] input'); if (i) i.focus(); } break;
+        case 'report': await act('report.create', { userId: Number(f.dataset.uid), dealId: f.dataset.deal || null, reason: d.reason }, 'گزارش به مدیریت ارسال شد.'); break;
+        case 'profile': await act('profile.update', { ...d, showContact: !!f.showContact.checked }, 'مشخصات ذخیره شد.'); break;
+        case 'resubmit': await act('account.resubmit', d, 'مشخصات مجدداً برای بررسی ارسال شد.'); break;
+        case 'password': await backend.changePassword(d.current, d.next); f.reset(); toast('رمز عبور تغییر کرد.'); break;
+        /* admin */
+        case 'reject-user': await act('admin.user.setStatus', { userId: id, status: 'rejected', reason: d.reason }, 'درخواست رد و به متقاضی اعلام شد.'); ui.members.list = null; break;
+        case 'block-user': await act('admin.user.setStatus', { userId: id, status: 'blocked', reason: d.reason }, 'حساب مسدود شد.'); ui.members.list = null; break;
+        case 'member-search': ui.members = { ...ui.members, q: d.q.trim(), status: d.q.trim() ? '' : ui.members.status, list: null, offset: 0 }; render(); break;
+        case 'resolve': await act('admin.report.resolve', { reportId: id, note: d.note }, 'رسیدگی ثبت شد.'); break;
+        case 'sensitive': await runSensitive(d.password); break;
+        case 'confirm-large': await runSensitive(d.password, { confirmLarge: true }); break;
+        case 'rate':
+          pendingSensitive = { type: 'admin.rate.set', payload: { assetId: id, buy: d.buy, sell: d.sell }, okMsg: 'نرخ رسمی ثبت و منتشر شد.' };
+          await runSensitive(d.password); break;
+        case 'asset': sensitive('admin.asset.save', { ...d, id: d.id ? Number(d.id) : undefined }, 'دارایی ذخیره شد.', `ذخیره دارایی ${esc(d.code)}`); break;
+        case 'broadcast': sensitive('admin.broadcast', d, 'اطلاعیه ارسال شد.', `ارسال اطلاعیه به همه اعضا: «${esc(d.text)}»`); break;
+        case 'totp-enable': await backend.totpEnable(d.code, d.password); ui.totp = null; await refresh(); render(); toast('تأیید دومرحله‌ای فعال شد.'); break;
+        case 'totp-disable': await backend.totpDisable(d.code, d.password); await refresh(); render(); toast('تأیید دومرحله‌ای غیرفعال شد.', true); break;
         default: break;
       }
     } catch (err) { showErr(err.message); } finally { if (btn && btn.isConnected) btn.disabled = false; }
@@ -1231,7 +1408,7 @@
     const t = e.target;
     if (t.dataset.filter) {
       ui.filters[t.dataset.filter] = t.value;
-      if (t.dataset.filter === 'sort' || t.tagName === 'SELECT') render(); else renderMarketTable();
+      if (t.tagName === 'SELECT') render(); else renderMarketTable();
       return;
     }
     if (t.dataset.calc) {
@@ -1241,6 +1418,15 @@
       if (el) el.textContent = v > 0 ? `${fmt(v, 2)} ${o ? o.priceCurrency : ''}` : '—';
     }
     if (t.closest('[data-form="order"]')) updateOrderAside();
+    const rf = t.closest('[data-form="rate"]');
+    if (rf) {
+      const r = view.rates.find((x) => x.assetId === Number(rf.dataset.id));
+      const buy = Number(rf.buy.value), sell = Number(rf.sell.value), el = document.getElementById('rate-delta');
+      if (el && r && buy > 0 && sell > 0) {
+        const ch = (((buy + sell) / 2 - (r.buy + r.sell) / 2) / ((r.buy + r.sell) / 2)) * 100;
+        el.innerHTML = `تغییر نسبت به نرخ فعلی: <b class="num chg ${ch >= 0 ? 'up' : 'down'}">${ch >= 0 ? '+' : ''}${ch.toFixed(2)}%</b>${Math.abs(ch) > 15 ? ' — <b style="color:var(--sell)">تغییر بزرگ</b>' : ''}`;
+      }
+    }
   });
   document.addEventListener('change', async (e) => {
     const t = e.target;
@@ -1250,10 +1436,9 @@
     }
     if (t.dataset.change === 'demo-switch') {
       LocalBackend.setUid(Number(t.value) || null); await refresh(); render();
-      if (view.me) toast(`اکنون به‌عنوان «${view.me.company}» وارد شده‌اید`);
     }
   });
-  window.addEventListener('hashchange', () => { ui.menuOpen = false; ui.notifOpen = false; closeModal(); render(); });
+  window.addEventListener('hashchange', () => { ui.notifOpen = false; closeModal(); render(); });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 
   /* =========================================================
@@ -1272,16 +1457,18 @@
   document.documentElement.dataset.theme = store.get('sarai-theme') === 'light' ? 'light' : 'dark';
   (async function boot() {
     backend = await detect();
-    if (backend === ServerBackend && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
     if (backend === LocalBackend) LocalBackend.init();
     if (backend === ServerBackend) ADMIN_MODE = document.documentElement.dataset.mode === 'admin';
     else {
       try { if (location.hash === '#sarai-panel') sessionStorage.setItem('sarai-admin', '1'); ADMIN_MODE = sessionStorage.getItem('sarai-admin') === '1'; }
       catch { ADMIN_MODE = location.hash === '#sarai-panel'; }
     }
+    backend.scope = ADMIN_MODE ? 'admin' : 'user';
     if (ADMIN_MODE) document.title = 'پنل مدیریت — سرای شهزاده';
+    if (backend === ServerBackend && !ADMIN_MODE && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
     await refresh();
-    backend.subscribe((v) => { if (v !== view.version) onRemoteChange(); });
+    backend.subscribe(onRemoteChange, onMarket);
+    if (ADMIN_MODE) setInterval(() => { if (!busy()) onRemoteChange(); }, 120e3); // keeps idle-timeout state accurate
     render();
   })().catch((e) => { $app.innerHTML = `<div style="padding:40px;text-align:center">خطا در بارگذاری: ${esc(e.message)}</div>`; });
 })();
