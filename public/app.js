@@ -120,6 +120,14 @@
     bell: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 01-3.4 0"/></svg>',
     menu: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/></svg>',
     box: '<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 8l-9-5-9 5 9 5 9-5zM3 8v8l9 5 9-5V8M12 13v8"/></svg>',
+    sun: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
+    moon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/></svg>',
+    nHome: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7v9a1 1 0 01-1 1h-5v-6H9v6H4a1 1 0 01-1-1z"/></svg>',
+    nMarket: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4v16M7 4l-3 3M7 4l3 3M17 20V4M17 20l-3-3M17 20l3-3"/></svg>',
+    nRates: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18M5 16l4-5 4 3 6-8"/></svg>',
+    nNew: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>',
+    nDash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="2"/><rect x="14" y="3" width="7" height="5" rx="2"/><rect x="14" y="12" width="7" height="9" rx="2"/><rect x="3" y="16" width="7" height="5" rx="2"/></svg>',
+    nAdmin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg>',
     logo: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M3 21h18M5 21V10l7-6 7 6v11M9 21v-6h6v6M9 11h.01M15 11h.01"/></svg>',
     wa: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 00-8.6 15.1L2 22l5-1.3A10 10 0 1012 2zm5.3 14.2c-.2.6-1.3 1.2-1.8 1.2-.5.1-1 .2-3.3-.7-2.8-1.1-4.5-3.9-4.7-4.1-.1-.2-1.1-1.5-1.1-2.8s.7-2 1-2.3c.2-.3.5-.3.7-.3h.5c.2 0 .4 0 .6.5l.9 2.1c.1.2.1.4 0 .5l-.3.5-.4.4c-.1.1-.3.3-.1.6.2.3.7 1.2 1.6 1.9 1.1.9 2 1.2 2.3 1.4.3.1.5.1.6-.1l.9-1c.2-.3.4-.2.6-.1l2 .9c.3.1.5.2.5.3.1.2.1.7-.1 1.2z"/></svg>',
   };
@@ -208,7 +216,7 @@
                  <a class="btn btn-light btn-sm me-btn" href="#profile">${esc(m.company || m.name)}</a>
                  <button class="btn btn-light btn-sm" data-act="logout"><span class="btn-text">خروج</span><span aria-hidden="true">⎋</span></button>`
               : `<a class="btn btn-light btn-sm" href="#login">ورود</a><a class="btn btn-primary btn-sm" href="#register">ثبت‌نام</a>`}
-          <button class="bell menu-btn" data-act="toggle-menu" aria-label="منو">${ICON.menu}</button>
+          <button class="bell" data-act="theme" aria-label="تغییر تم">${document.documentElement.dataset.theme === 'light' ? ICON.moon : ICON.sun}</button>
         </div>
       </div>
       ${view.rates.length ? `<div class="ticker"><div class="ticker-track">${tickerItems}${tickerItems}</div></div>` : ''}
@@ -237,14 +245,39 @@
     let page;
     try { page = pageFor(r); } catch (e) { console.error(e); page = `<div class="card card-pad">${esc(e.message)}</div>`; }
     const scrollY = window.scrollY;
-    $app.innerHTML = `${header()}<main>${page}</main>
+    const entering = render.lastRoute !== r;
+    $app.innerHTML = `${header()}<main class="${entering ? 'enter' : ''}">${page}</main>${bottomNav(r)}
       <footer class="footer">سرای شهزاده کابل — بستر معرفی پیشنهاد و ارتباط خریدار و فروشنده. انتقال پول و تسویه در این سایت انجام نمی‌شود.</footer>`;
     if (render.lastRoute === r) window.scrollTo(0, scrollY); else window.scrollTo(0, 0);
     render.lastRoute = r;
+    if (entering) countUp();
     const chat = document.querySelector('.chat'); if (chat) chat.scrollTop = chat.scrollHeight;
     afterRender();
   }
 
+  function bottomNav(r) {
+    const items = [['home', 'خانه', ICON.nHome], ['market', 'بازار', ICON.nMarket], ['new', 'ثبت', ICON.nNew], ['rates', 'نرخ‌ها', ICON.nRates],
+      me() ? (isAdmin() && r.startsWith('admin') ? ['admin', 'مدیریت', ICON.nAdmin] : ['dashboard', 'داشبورد', ICON.nDash]) : ['login', 'ورود', ICON.nDash]];
+    return `<nav class="bottom-nav">${items.map(([h, l, ic]) => `<a href="#${h}" class="${r === h || r.startsWith(h + '-') ? 'active' : ''}">${ic}<span>${l}</span></a>`).join('')}</nav>`;
+  }
+  // Animated number counters for elements with data-count
+  function countUp() {
+    document.querySelectorAll('[data-count]').forEach((el) => {
+      const target = Number(el.dataset.count); if (!isFinite(target) || target === 0) return;
+      const t0 = performance.now(), dur = 1100;
+      const step = (t) => { const k = Math.min(1, (t - t0) / dur); const e = 1 - Math.pow(1 - k, 4); el.textContent = Math.round(target * e).toLocaleString('en-US'); if (k < 1) requestAnimationFrame(step); };
+      el.textContent = '0'; requestAnimationFrame(step);
+    });
+  }
+  // Circular gradient ring (SVG)
+  let ringSeq = 0;
+  function ringSvg(frac, size, stroke, c1, c2) {
+    const id = 'rg' + (++ringSeq), r = (size - stroke) / 2, len = 2 * Math.PI * r;
+    const off = len * (1 - Math.max(0.02, Math.min(1, frac)));
+    return `<svg viewBox="0 0 ${size} ${size}" width="${size}" height="${size}"><defs><linearGradient id="${id}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${c1}"/><stop offset="1" stop-color="${c2}"/></linearGradient></defs>
+      <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="rgba(127,127,127,.12)" stroke-width="${stroke}"/>
+      <circle class="arc" style="--len:${len.toFixed(1)}" cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="url(#${id})" stroke-width="${stroke}" stroke-linecap="round" stroke-dasharray="${len.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}"/></svg>`;
+  }
   function pageFor(r) {
     let m;
     if (r === 'home') return pageHome();
@@ -319,24 +352,33 @@
     return `
     <section class="hero">
       <div>
-        <span class="badge blue" style="background:rgba(59,130,246,.2);color:#bcd3ff">بازار دیجیتال صرافان، زرگران و تاجران</span>
-        <h1>معاملات سرای شهزاده،<br>بدون کانال تلگرام و گروه واتس‌اپ</h1>
-        <p>پیشنهاد خرید یا فروش خود را ثبت کنید، پیشنهادهای دیگران را ببینید و با یک کلیک درخواست معامله بفرستید. فروشنده یا خریدار درخواست را تأیید می‌کند و ارتباط مستقیم برقرار می‌شود.</p>
-        <div class="row" style="margin-bottom:22px">
+        <span class="live"><i></i><b>زنده</b> بازار دیجیتال صرافان، زرگران و تاجران</span>
+        <h1>معاملات سرای شهزاده،<br><span class="accent">بدون کانال تلگرام و واتس‌اپ</span></h1>
+        <p>پیشنهاد خرید یا فروش خود را ثبت کنید، پیشنهادهای دیگران را ببینید و با یک کلیک درخواست معامله بفرستید. طرف مقابل تأیید می‌کند و ارتباط مستقیم برقرار می‌شود.</p>
+        <div class="row">
           <a class="btn btn-primary btn-lg" href="#market">ورود به بازار</a>
-          <a class="btn btn-light btn-lg" href="${approved() ? '#new' : me() ? '#profile' : '#register'}">${me() ? 'ثبت سفارش جدید' : 'عضویت رایگان'}</a>
+          <a class="btn btn-lg" href="${approved() ? '#new' : me() ? '#profile' : '#register'}">${me() ? 'ثبت سفارش جدید' : 'عضویت رایگان'}</a>
         </div>
-        <div class="stats">
-          <div class="stat"><b class="num">${view.stats.activeOrders}</b><span>سفارش فعال</span></div>
-          <div class="stat"><b class="num">${view.stats.members}</b><span>عضو تأییدشده</span></div>
-          <div class="stat"><b class="num">${view.stats.completedDeals}</b><span>معامله تکمیل‌شده</span></div>
+        <div class="book-mini">
+          <table><thead><tr><th>دارایی</th><th>بهترین خرید</th><th>بهترین فروش</th></tr></thead><tbody>
+          ${book.length ? book.slice(0, 5).map((b) => `<tr><td>${esc(b.a.name)}</td><td class="b num">${b.bid != null ? fmt(b.bid) : '—'}</td><td class="s num">${b.ask != null ? fmt(b.ask) : '—'}</td></tr>`).join('') : '<tr><td colspan="3" class="muted" style="text-align:center">هنوز پیشنهادی ثبت نشده</td></tr>'}
+          </tbody></table>
         </div>
       </div>
-      <div class="book-mini">
-        <table><thead><tr><th>دارایی</th><th>بهترین خرید</th><th>بهترین فروش</th></tr></thead><tbody>
-        ${book.length ? book.slice(0, 7).map((b) => `<tr><td>${esc(b.a.name)}</td><td class="b num">${b.bid != null ? fmt(b.bid) : '—'}</td><td class="s num">${b.ask != null ? fmt(b.ask) : '—'}</td></tr>`).join('') : '<tr><td colspan="3" style="text-align:center;color:#9fb3d6">هنوز پیشنهادی ثبت نشده</td></tr>'}
-        </tbody></table>
-      </div>
+      ${(() => {
+        const st = view.stats, n = st.activeOrders || 0;
+        const sellFrac = n ? st.sellOrders / n : 0;
+        const mx = Math.max(st.members, st.activeDeals, st.completedDeals, 1);
+        const mini = (v, c1, c2, label, sub, color) => `<div class="ring-item"><span class="node" style="color:${color}"></span><div class="mini">${ringSvg(0.15 + 0.8 * (v / mx), 84, 5, c1, c2)}<b class="num" data-count="${v}">${v}</b></div><div class="lbl" style="color:${color}">${label}<small>${sub}</small></div></div>`;
+        return `<div class="rings">
+          <div class="ring-big glow"><span class="halo"></span>${ringSvg(sellFrac || 0.02, 250, 14, '#22d3ee', '#3b82f6')}
+            <div class="center"><b class="num" data-count="${n}">${n}</b><span>پیشنهاد فعال در بازار</span><em>${st.sellOrders} فروش · ${st.buyOrders} خرید</em></div></div>
+          <div class="ring-list">
+            ${mini(st.members, '#3ee09a', '#12a868', 'عضو تأییدشده', 'صراف، زرگر، تاجر', 'var(--buy)')}
+            ${mini(st.activeDeals, '#8b7cf6', '#3b82f6', 'در حال انجام', 'معاملات تأییدشده', '#8b9cff')}
+            ${mini(st.completedDeals, '#ffb34d', '#ff6b7a', 'تکمیل‌شده', 'تأیید دوطرفه', 'var(--sell)')}
+          </div></div>`;
+      })()}
     </section>
 
     <div class="page-head" style="margin-top:28px"><div><h1>آخرین پیشنهادهای بازار</h1><p>پیشنهادهای فعال اعضای تأییدشده</p></div><a class="btn" href="#market">مشاهده همه ←</a></div>
@@ -371,7 +413,7 @@
     ${!me() ? '<div class="notice" style="margin-bottom:16px">نام معامله‌گران و امکان ارسال درخواست فقط برای اعضای تأییدشده نمایش داده می‌شود. <a href="#register">عضو شوید</a> یا <a href="#login">وارد شوید</a>.</div>' : ''}
     ${me() && !approved() ? '<div class="notice warn" style="margin-bottom:16px">حساب شما منتظر تأیید مدیر است. پس از تأیید می‌توانید درخواست خرید و فروش بفرستید.</div>' : ''}
     ${book.length ? `<div class="grid g4" style="margin-bottom:18px">${book.map((b) => `
-      <div class="card tile" style="cursor:pointer" data-act="filter-asset" data-id="${b.a.id}">
+      <div class="card tile sheen" style="cursor:pointer" data-act="filter-asset" data-id="${b.a.id}">
         <div class="row">${assetChip(b.a)}<span class="spacer"></span><span class="badge">${b.n} پیشنهاد</span></div>
         <div class="grid g2" style="gap:8px;margin-top:10px">
           <div><span class="small muted">بهترین خرید</span><div class="num" style="color:var(--buy);font-weight:800">${b.bid != null ? fmt(b.bid) : '—'}</div></div>
@@ -645,10 +687,10 @@
       }
       body = `
       <div class="grid g4" style="margin-bottom:18px">
-        <div class="card tile"><span>سفارش‌های فعال</span><b class="num">${myOrders.filter((o) => o.status === 'active').length}</b></div>
-        <div class="card tile"><span>درخواست‌های منتظر پاسخ</span><b class="num" style="color:${pendingIn.length ? 'var(--sell)' : 'inherit'}">${pendingIn.length}</b></div>
-        <div class="card tile"><span>معاملات در حال انجام</span><b class="num" style="color:var(--blue)">${activeDeals.length}</b></div>
-        <div class="card tile"><span>معاملات تکمیل‌شده</span><b class="num" style="color:var(--buy)">${doneDeals.length}</b></div>
+        <div class="card tile sheen"><span>سفارش‌های فعال</span><b class="num" data-count="${myOrders.filter((o) => o.status === 'active').length}">${myOrders.filter((o) => o.status === 'active').length}</b></div>
+        <div class="card tile sheen"><span>درخواست‌های منتظر پاسخ</span><b class="num" style="color:${pendingIn.length ? 'var(--sell)' : 'inherit'}" data-count="${pendingIn.length}">${pendingIn.length}</b></div>
+        <div class="card tile sheen"><span>معاملات در حال انجام</span><b class="num" style="color:var(--blue)" data-count="${activeDeals.length}">${activeDeals.length}</b></div>
+        <div class="card tile sheen"><span>معاملات تکمیل‌شده</span><b class="num" style="color:var(--buy)" data-count="${doneDeals.length}">${doneDeals.length}</b></div>
       </div>
       <div class="split">
         <div class="stack">
@@ -729,7 +771,7 @@
         </div>
         <label class="field"><span>نوع فعالیت</span><select class="input" name="activity">${Object.entries(E.ACTIVITIES).map(([k, v]) => `<option value="${k}" ${m.activity === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
         <label class="field"><span>معرفی کوتاه (آدرس دفتر، ساعات کاری…)</span><textarea class="input" name="bio">${esc(m.bio)}</textarea></label>
-        <label class="row small"><input type="checkbox" name="showContact" ${m.showContact ? 'checked' : ''}> نمایش شماره تماس و واتس‌اپ به طرف معامله پس از تأیید درخواست</label>
+        <label class="row small"><input type="checkbox" class="switch" name="showContact" ${m.showContact ? 'checked' : ''}> نمایش شماره تماس و واتس‌اپ به طرف معامله پس از تأیید درخواست</label>
         <button class="btn btn-primary">ذخیره تغییرات</button>
       </form>
       <aside class="stack">
@@ -766,16 +808,16 @@
     const X = (t) => padL + ((t - t0) / (t1 - t0 || 1)) * (w - padL - (small ? 2 : 60));
     const Y = (v) => pad + (1 - (v - lo) / (hi - lo)) * (h - pad * 2);
     const path = (k) => points.map((p, i) => `${i ? 'L' : 'M'}${X(p.at).toFixed(1)},${Y(p[k]).toFixed(1)}`).join('');
-    if (small) return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="height:${h}px"><path d="${path('sell')}" fill="none" stroke="#1f63e0" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>`;
+    if (small) return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="height:${h}px;overflow:visible"><path d="${path('sell')}" fill="none" stroke="#3b82f6" stroke-width="2" vector-effect="non-scaling-stroke" style="filter:drop-shadow(0 0 4px rgba(59,130,246,.7))"/></svg>`;
     const ticks = [lo, (lo + hi) / 2, hi];
     const area = `${path('sell')}L${X(t1)},${h - pad}L${X(t0)},${h - pad}Z`;
     const xl = [points[0], points[Math.floor(points.length / 2)], points[points.length - 1]];
     return `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="نمودار تغییرات نرخ" style="direction:ltr">
-      <defs><linearGradient id="ga" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#1f63e0" stop-opacity=".18"/><stop offset="1" stop-color="#1f63e0" stop-opacity="0"/></linearGradient></defs>
-      ${ticks.map((v) => `<line x1="${padL}" x2="${w - 60}" y1="${Y(v)}" y2="${Y(v)}" stroke="#e2e8f2" stroke-dasharray="3 4"/><text x="${w - 54}" y="${Y(v) + 4}" font-size="11" fill="#7a879c">${fmt(v, 4)}</text>`).join('')}
+      <defs><linearGradient id="ga" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#3b82f6" stop-opacity=".28"/><stop offset="1" stop-color="#3b82f6" stop-opacity="0"/></linearGradient></defs>
+      ${ticks.map((v) => `<line x1="${padL}" x2="${w - 60}" y1="${Y(v)}" y2="${Y(v)}" stroke="rgba(127,127,127,.18)" stroke-dasharray="3 4"/><text x="${w - 54}" y="${Y(v) + 4}" font-size="11" fill="#7a879c">${fmt(v, 4)}</text>`).join('')}
       <path d="${area}" fill="url(#ga)"/>
-      <path d="${path('buy')}" fill="none" stroke="#0f9960" stroke-width="2"/>
-      <path d="${path('sell')}" fill="none" stroke="#1f63e0" stroke-width="2.4"/>
+      <path d="${path('buy')}" fill="none" stroke="#2fd389" stroke-width="2" style="filter:drop-shadow(0 0 4px rgba(47,211,137,.6))"/>
+      <path d="${path('sell')}" fill="none" stroke="#3b82f6" stroke-width="2.4" style="filter:drop-shadow(0 0 5px rgba(59,130,246,.7))"/>
       ${xl.map((p) => `<text x="${X(p.at)}" y="${h - 6}" font-size="11" fill="#7a879c" text-anchor="middle">${dayFmt.format(new Date(p.at))}</text>`).join('')}
     </svg>`;
   }
@@ -790,7 +832,7 @@
       ${rated.map(({ r, a }) => {
         const mid = (r.buy + r.sell) / 2, ch = r.prevMid ? ((mid - r.prevMid) / r.prevMid) * 100 : 0;
         const b = book.find((x) => x.a.id === a.id);
-        return `<div class="card rate-card ${sel && sel.a.id === a.id ? 'on' : ''}" data-act="rate-pick" data-id="${a.id}">
+        return `<div class="card rate-card sheen ${sel && sel.a.id === a.id ? 'on' : ''}" data-act="rate-pick" data-id="${a.id}">
           <div class="row">${assetChip(a)}<span class="spacer"></span><span class="chg num small ${ch >= 0 ? 'up' : 'down'}">${ch >= 0 ? '▲' : '▼'} ${Math.abs(ch).toFixed(2)}%</span></div>
           <div class="rates"><div><span>خرید</span><b class="num">${fmt(r.buy)}</b></div><div><span>فروش</span><b class="num">${fmt(r.sell)}</b></div></div>
           <div class="chart">${lineChart(view.rateHistory.filter((h) => h.assetId === a.id).slice(-20), { w: 200, h: 34, small: true })}</div>
@@ -798,7 +840,7 @@
         </div>`;
       }).join('')}
     </div>
-    ${sel ? `<div class="split"><div class="card card-pad"><div class="row"><h2 style="margin:0">نمودار تغییرات ${esc(sel.a.name)}</h2><span class="spacer"></span><span class="small"><span style="color:#0f9960">━ خرید</span> &nbsp; <span style="color:#1f63e0">━ فروش</span></span></div><div class="chart" style="margin-top:10px">${lineChart(hist.slice(-60))}</div></div>
+    ${sel ? `<div class="split"><div class="card card-pad"><div class="row"><h2 style="margin:0">نمودار تغییرات ${esc(sel.a.name)}</h2><span class="spacer"></span><span class="small"><span style="color:var(--buy)">━ خرید</span> &nbsp; <span style="color:var(--blue-2)">━ فروش</span></span></div><div class="chart" style="margin-top:10px">${lineChart(hist.slice(-60))}</div></div>
       <aside class="card card-pad"><h3>جزئیات</h3><dl class="kv"><dt>نرخ خرید</dt><dd class="num">${fmt(sel.r.buy)} ${esc(sel.r.currency)}</dd><dt>نرخ فروش</dt><dd class="num">${fmt(sel.r.sell)} ${esc(sel.r.currency)}</dd><dt>آخرین به‌روزرسانی</dt><dd>${fmtDate(sel.r.updatedAt)}</dd>
         ${(() => { const b = book.find((x) => x.a.id === sel.a.id); return b ? `<dt>بهترین پیشنهاد خرید اعضا</dt><dd class="num" style="color:var(--buy)">${b.bid != null ? fmt(b.bid) : '—'}</dd><dt>بهترین پیشنهاد فروش اعضا</dt><dd class="num" style="color:var(--sell)">${b.ask != null ? fmt(b.ask) : '—'}</dd>` : ''; })()}</dl>
         <button class="btn btn-block" style="margin-top:14px" data-act="filter-asset" data-id="${sel.a.id}">مشاهده پیشنهادهای ${esc(sel.a.name)} در بازار</button></aside></div>` : emptyBox('نرخی ثبت نشده است')}`;
@@ -859,10 +901,10 @@
         vol[k].amt += d.acceptedAmount; vol[k].value += d.acceptedAmount * d.price; vol[k].n++;
       }
       body = `<div class="grid g4" style="margin-bottom:18px">
-        <div class="card tile"><span>کل کاربران</span><b class="num">${A.users.length}</b></div>
-        <div class="card tile"><span>منتظر تأیید</span><b class="num" style="color:var(--warn)">${pendingUsers}</b></div>
-        <div class="card tile"><span>سفارش‌های فعال</span><b class="num">${view.stats.activeOrders}</b></div>
-        <div class="card tile"><span>معاملات تکمیل‌شده</span><b class="num" style="color:var(--buy)">${view.stats.completedDeals}</b></div></div>
+        <div class="card tile sheen"><span>کل کاربران</span><b class="num" data-count="${A.users.length}">${A.users.length}</b></div>
+        <div class="card tile sheen"><span>منتظر تأیید</span><b class="num" style="color:var(--warn)" data-count="${pendingUsers}">${pendingUsers}</b></div>
+        <div class="card tile sheen"><span>سفارش‌های فعال</span><b class="num" data-count="${view.stats.activeOrders}">${view.stats.activeOrders}</b></div>
+        <div class="card tile sheen"><span>معاملات تکمیل‌شده</span><b class="num" style="color:var(--buy)" data-count="${view.stats.completedDeals}">${view.stats.completedDeals}</b></div></div>
         <div class="grid g2">
           <div class="card"><div class="card-pad" style="padding-bottom:4px"><h2>گزارش دوره‌ای</h2></div><table class="data responsive"><thead><tr><th>دوره</th><th>سفارش جدید</th><th>درخواست</th><th>تأییدشده</th><th>تکمیل‌شده</th></tr></thead><tbody>${periods.map(row).join('')}</tbody></table></div>
           <div class="card"><div class="card-pad" style="padding-bottom:4px"><h2>حجم معاملات تأییدشده به تفکیک دارایی</h2></div>${Object.values(vol).length ? `<table class="data responsive"><thead><tr><th>دارایی</th><th>تعداد</th><th>مقدار</th><th>ارزش</th></tr></thead><tbody>${Object.values(vol).map((v) => `<tr><td class="cell-main">${assetChip(v.a)}</td><td data-l="تعداد" class="num">${v.n}</td><td data-l="مقدار"><span class="num">${fmt(v.amt)}</span> ${esc(v.unit)}</td><td data-l="ارزش"><span class="num">${fmt(v.value, 0)}</span> ${esc(v.cur)}</td></tr>`).join('')}</tbody></table>` : emptyBox('هنوز معامله‌ای تأیید نشده')}</div>
@@ -948,6 +990,10 @@
     switch (a) {
       case 'close-modal': closeModal(); break;
       case 'toggle-menu': ui.menuOpen = !ui.menuOpen; render(); break;
+      case 'theme': {
+        const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+        document.documentElement.dataset.theme = next; store.set('sarai-theme', next); render(); break;
+      }
       case 'toggle-notifs': ui.notifOpen = !ui.notifOpen; render(); break;
       case 'read-all': await act('notifications.read', {}); break;
       case 'open-notif': ui.notifOpen = false; await backend.action('notifications.read', { id: nid }).catch(() => {}); await refresh(); if (t.dataset.link) location.hash = t.dataset.link; render(); break;
@@ -1067,6 +1113,7 @@
     } catch { /* no server: demo mode */ }
     return LocalBackend;
   }
+  document.documentElement.dataset.theme = store.get('sarai-theme') === 'light' ? 'light' : 'dark';
   (async function boot() {
     backend = await detect();
     if (backend === LocalBackend) LocalBackend.init();

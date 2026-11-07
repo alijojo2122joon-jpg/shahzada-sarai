@@ -469,6 +469,9 @@
       members: state.users.filter((u) => u.status === 'approved').length,
       activeOrders: state.orders.filter((o) => o.status === 'active').length,
       completedDeals: state.deals.filter((d) => d.status === 'completed').length,
+      activeDeals: state.deals.filter((d) => d.status === 'accepted').length,
+      sellOrders: state.orders.filter((o) => o.status === 'active' && o.side === 'sell').length,
+      buyOrders: state.orders.filter((o) => o.status === 'active' && o.side === 'buy').length,
     };
     const view = {
       version: state.version,
