@@ -1049,7 +1049,7 @@
         <select class="input" data-rates="sort" style="width:auto">${[['popular', 'پرمعامله‌ها'], ['name', 'نام ارز'], ['up', 'بیشترین افزایش'], ['down', 'بیشترین کاهش']].map(([v, l]) => `<option value="${v}" ${rv.sort === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
       </div>`}
       <div class="table-wrap"><table class="data responsive official-table"><thead><tr><th>ارز</th><th>نماد</th><th>قیمت خرید</th><th>قیمت فروش</th><th>تغییرات</th><th>روند ۷ روز</th><th>آخرین به‌روزرسانی</th></tr></thead><tbody>
-        ${rows.map(({ r, a }) => `<tr class="clickable ${r && rv.key === r.key && !compact ? 'sel' : ''}" ${r ? `data-act="rate-open" data-key="${esc(r.key)}"` : ''}>
+        ${rows.map(({ r, a }) => `<tr class="clickable ${r ? '' : 'norate'} ${r && rv.key === r.key && !compact ? 'sel' : ''}" ${r ? `data-act="rate-open" data-key="${esc(r.key)}"` : ''}>
           <td class="cell-main">${r ? `<button class="star ${wl.includes(r.key) ? 'on' : ''}" data-act="watch" data-key="${esc(r.key)}" aria-label="فهرست منتخب">★</button>` : ''}${assetChip(a)}</td>
           <td data-l="نماد"><b class="ltr">${esc(a.code)}</b><div class="muted small">به ${esc(quoteLabel(r ? r.quote : 'AFN'))}${r && r.settlement === 'forward' ? ' · <span class="badge warn">فردایی</span>' : ''}</div></td>
           <td data-l="قیمت خرید" class="${flashCls(r, 'buy')}">${r && r.buy != null ? `<b class="num price" style="color:var(--buy)">${fmt(r.buy)}</b>` : '<span class="muted small">بدون نرخ معتبر</span>'}</td>
