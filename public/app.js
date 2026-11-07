@@ -255,9 +255,18 @@
     afterRender();
   }
 
+  function adminBanner() {
+    const A = view.admin; if (!A) return '';
+    const pend = A.users.filter((u) => u.status === 'pending').length, reps = A.reports.filter((x) => x.status === 'open').length;
+    return `<a href="#admin-users" class="card card-pad sheen glow ${pend ? 'g-warm' : ''}" style="display:flex;align-items:center;gap:16px;margin:22px 0;color:inherit">
+      <span class="asset-ico" style="width:52px;height:52px">${ICON.nAdmin.replace('<svg ', '<svg width="24" height="24" ')}</span>
+      <span style="flex:1"><b style="font-size:17px">پنل مدیریت</b><div class="muted small">همه اعضا: <span class="num">${A.users.length}</span> · منتظر تأیید: <b class="num" style="color:${pend ? 'var(--warn)' : 'inherit'}">${pend}</b>${reps ? ` · گزارش باز: <b class="num" style="color:var(--sell)">${reps}</b>` : ''}</div></span>
+      <span class="btn btn-primary btn-sm">${pend ? 'بررسی ثبت‌نام‌ها' : 'ورود به مدیریت'} ←</span></a>`;
+  }
   function bottomNav(r) {
-    const items = [['home', 'خانه', ICON.nHome], ['market', 'بازار', ICON.nMarket], ['new', 'ثبت', ICON.nNew], ['rates', 'نرخ‌ها', ICON.nRates],
-      me() ? (isAdmin() && r.startsWith('admin') ? ['admin', 'مدیریت', ICON.nAdmin] : ['dashboard', 'داشبورد', ICON.nDash]) : ['login', 'ورود', ICON.nDash]];
+    const items = [['home', 'خانه', ICON.nHome], ['market', 'بازار', ICON.nMarket], ['new', 'ثبت', ICON.nNew],
+      isAdmin() ? ['admin', 'مدیریت', ICON.nAdmin] : ['rates', 'نرخ‌ها', ICON.nRates],
+      me() ? ['dashboard', 'داشبورد', ICON.nDash] : ['login', 'ورود', ICON.nDash]];
     return `<nav class="bottom-nav">${items.map(([h, l, ic]) => `<a href="#${h}" class="${r === h || r.startsWith(h + '-') ? 'active' : ''}">${ic}<span>${l}</span></a>`).join('')}</nav>`;
   }
   // Animated number counters for elements with data-count
@@ -381,6 +390,7 @@
       })()}
     </section>
 
+    ${isAdmin() ? adminBanner() : ''}
     <div class="page-head" style="margin-top:28px"><div><h1>آخرین پیشنهادهای بازار</h1><p>پیشنهادهای فعال اعضای تأییدشده</p></div><a class="btn" href="#market">مشاهده همه ←</a></div>
     <div class="card">${ordersTable(active.slice(0, 6), { empty: 'هنوز سفارشی ثبت نشده است' })}</div>
 
@@ -731,6 +741,7 @@
         ${view.notifications.length ? view.notifications.map((n) => `<div class="notif ${n.read ? '' : 'unread'}" data-act="open-notif" data-id="${n.id}" data-link="${esc(n.link)}">${esc(n.text)}<time>${fmtDate(n.at)}</time></div>`).join('') : emptyBox('اعلانی ندارید')}</div>`;
     }
     return `<div class="page-head"><div><h1>داشبورد ${esc(m.company)}</h1><p>${userBadge(m.status)} · ${E.ACTIVITIES[m.activity] || ''}</p></div>${approved() ? '<a class="btn btn-primary" href="#new">+ سفارش جدید</a>' : ''}</div>
+      ${isAdmin() ? adminBanner() : ''}
       ${m.status !== 'approved' ? '<div class="notice warn" style="margin-bottom:16px">حساب شما منتظر تأیید مدیر سیستم است. تا آن زمان امکان ثبت سفارش و ارسال درخواست وجود ندارد.</div>' : ''}
       ${tabBar}${body}`;
   }
