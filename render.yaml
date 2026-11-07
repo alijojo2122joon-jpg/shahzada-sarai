@@ -1,0 +1,18 @@
+# One-click deploy on Render.com (Dashboard → New → Blueprint → pick this repo)
+services:
+  - type: web
+    name: shahzada-sarai
+    runtime: node
+    plan: free            # free plan: data resets when the service restarts. For real use pick "starter" and enable the disk below.
+    buildCommand: echo "no build step"
+    startCommand: node server.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 22.12.0
+      - key: SECURE_COOKIE
+        value: "1"
+    # disk:                 # uncomment on a paid plan so the database survives restarts
+    #   name: data
+    #   mountPath: /opt/render/project/src/data
+    #   sizeGB: 1
