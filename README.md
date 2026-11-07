@@ -5,6 +5,10 @@
 
 > این نسخه فقط بستر معرفی پیشنهاد، ثبت درخواست و ارتباط خریدار و فروشنده است. انتقال پول، نگهداری دارایی و تسویه در سایت انجام نمی‌شود.
 
+## انتشار روی اینترنت (یک کلیک)
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/alijojo2122joon-jpg/shahzada-sarai)
+
 ## اجرا
 
 نیازمند **Node.js 22.5 یا جدیدتر**. هیچ پکیج خارجی لازم نیست (پایگاه داده SQLite داخل خود Node است).
