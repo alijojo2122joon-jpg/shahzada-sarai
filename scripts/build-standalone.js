@@ -7,6 +7,7 @@ const read = (p) => fs.readFileSync(path.join(root, p), 'utf8');
 const safe = (js) => js.replace(/<\/script/gi, '<\\/script');
 
 let html = read('public/index.html')
+  .replace(/\s*<link rel="(manifest|icon|apple-touch-icon)"[^>]*>/g, '')
   .replace('<link rel="stylesheet" href="styles.css">', () => `<style>\n${read('public/styles.css')}\n</style>`)
   .replace('<script src="shared/engine.js"></script>', () => `<script>\n${safe(read('shared/engine.js'))}\n</script>`)
   .replace('<script src="app.js"></script>', () => `<script>\n${safe(read('public/app.js'))}\n</script>`);

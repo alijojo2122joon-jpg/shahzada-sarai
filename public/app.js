@@ -1116,6 +1116,7 @@
   document.documentElement.dataset.theme = store.get('sarai-theme') === 'light' ? 'light' : 'dark';
   (async function boot() {
     backend = await detect();
+    if (backend === ServerBackend && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
     if (backend === LocalBackend) LocalBackend.init();
     await refresh();
     backend.subscribe((v) => { if (v !== view.version) onRemoteChange(); });

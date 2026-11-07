@@ -5,6 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>بازار معاملات سرای شهزاده کابل</title>
   <meta name="description" content="بازار دیجیتال معاملات صرافان، زرگران و تاجران سرای شهزاده کابل">
+  <meta name="theme-color" content="#1b1e25">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="سرای شهزاده">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700;800&display=swap">
@@ -2150,6 +2155,7 @@ textarea.input { min-height: 90px; resize: vertical; }
   document.documentElement.dataset.theme = store.get('sarai-theme') === 'light' ? 'light' : 'dark';
   (async function boot() {
     backend = await detect();
+    if (backend === ServerBackend && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
     if (backend === LocalBackend) LocalBackend.init();
     await refresh();
     backend.subscribe((v) => { if (v !== view.version) onRemoteChange(); });

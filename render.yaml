@@ -5,11 +5,11 @@ services:
     runtime: node
     plan: free            # free plan: data resets when the service restarts. For real use pick "starter" and enable the disk below.
     buildCommand: echo "no build step"
-    startCommand: node server.js
+    startCommand: node --experimental-sqlite server.js
     healthCheckPath: /api/health
     envVars:
       - key: NODE_VERSION
-        value: 22.12.0
+        value: 22.14.0
       - key: SECURE_COOKIE
         value: "1"
     # disk:                 # uncomment on a paid plan so the database survives restarts
