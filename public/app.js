@@ -193,6 +193,13 @@
   const waHref = (ph) => `https://wa.me/${esc(String(ph).replace(/^0/, '93').replace(/\D/g, ''))}`;
   const pageHead = (title, sub, actions = '') => `<div class="page-head"><div><h1>${title}</h1>${sub ? `<p>${sub}</p>` : ''}</div>${actions ? `<div class="row">${actions}</div>` : ''}</div>`;
 
+  const SEARCH = svg('<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>', 22);
+  const orb = (icon) => `<span class="glass-orb">${icon}</span>`;
+  const knobBtn = (href, label, icon, tone = '') => `<a class="btn-knob ${tone}" href="${href}">${orb(icon)}<span>${label}</span></a>`;
+  // Progress bar with a percentage bubble above the fill.
+  const tipBar = (pct) => `<div class="tipbar"><div class="tipbar-track"><i style="width:${pct}%"></i></div><span class="tipbar-tip num" style="right:calc(${pct}% - 22px)">${pct}%</span></div>`;
+  // Large number that fills with colour up to the given percentage.
+  const fillNum = (pct, label) => `<div class="fill-wrap"><span class="fill-num num" style="--p:${pct}%">${pct}<small>%</small></span>${label ? `<span class="muted small">${label}</span>` : ''}</div>`;
   let ringSeq = 0;
   function ringSvg(frac, size, stroke, c1, c2) {
     const id = 'rg' + (++ringSeq), r = (size - stroke) / 2, len = 2 * Math.PI * r;
@@ -360,7 +367,9 @@
   function bottomNav(r) {
     const items = [['home', 'خانه', ICON.nHome], ['rates', 'نرخ رسمی', ICON.nRates], ['new', 'ثبت', ICON.nNew], ['market', 'بازار', ICON.nMarket],
       me() ? ['dashboard', 'داشبورد', ICON.nDash] : ['login', 'ورود', ICON.nDash]];
-    return `<nav class="bottom-nav">${items.map(([h, l, ic]) => `<a href="#${h}" class="${r === h || r.startsWith(h + '-') ? 'active' : ''}">${ic}<span>${l}</span></a>`).join('')}</nav>`;
+    return `<nav class="bottom-nav">${items.map(([h, l, ic]) => h === 'new'
+      ? `<a href="#new" class="plus ${r === 'new' ? 'active' : ''}" aria-label="ثبت سفارش"><span class="plus-orb">${svg('<path d="M12 5v14M5 12h14"/>', 26)}</span></a>`
+      : `<a href="#${h}" class="${r === h || r.startsWith(h + '-') ? 'active' : ''}">${ic}<span>${l}</span></a>`).join('')}</nav>`;
   }
   function footer() {
     if (ADMIN_MODE) return '<footer class="footer">دسترسی به این بخش محدود به مدیران مجاز است. همه عملیات ثبت و نگهداری می‌شود.</footer>';
@@ -470,7 +479,7 @@
   function officialBoard({ compact = false } = {}) {
     const rows = view.rates.map((r) => ({ r, a: asset(r.assetId) })).filter((x) => x.a.active !== false);
     const last = rows.reduce((m, x) => Math.max(m, x.r.updatedAt || 0), 0);
-    return `<section class="card official glow">
+    return `<section class="card official glow aura">
       <div class="official-head">
         <div><span class="seal">${ICON.seal}</span></div>
         <div style="flex:1"><h2>نرخ رسمی بازار</h2><div class="muted small">${longDate.format(new Date())}</div></div>
@@ -503,12 +512,13 @@
         <h1 style="font-size:24px">وضعیت بازار</h1>
         <p>پیشنهادهای خرید و فروش اعضای تأییدشده سرای شهزاده. برای ارسال درخواست معامله، عضویت و تأیید مدیریت لازم است.</p>
         <div class="row">
-          <a class="btn btn-primary btn-lg" href="#market">مشاهده بازار</a>
-          <a class="btn btn-lg" href="${approved() ? '#new' : me() ? '#profile' : '#register'}">${approved() ? 'ثبت سفارش' : me() ? 'وضعیت حساب' : 'درخواست عضویت'}</a>
+          ${knobBtn('#market', 'مشاهده بازار', ICON.nMarket)}
+          ${knobBtn(approved() ? '#new' : me() ? '#profile' : '#register', approved() ? 'ثبت سفارش' : me() ? 'وضعیت حساب' : 'درخواست عضویت', approved() ? ICON.nNew : ICON.users, 'violet')}
         </div>
+        ${allocationChips()}
       </div>
       <div class="rings">
-        <div class="ring-big glow"><span class="halo"></span>${ringSvg(n ? st.sellOrders / n : 0.02, 250, 14, '#22d3ee', '#3b82f6')}
+        <div class="ring-big glow aura-round"><span class="halo"></span>${ringSvg(n ? st.sellOrders / n : 0.02, 250, 14, '#22d3ee', '#3b82f6')}
           <div class="center"><b class="num" data-count="${n}">${n}</b><span>پیشنهاد فعال</span><em>${st.sellOrders} فروش · ${st.buyOrders} خرید</em></div></div>
         <div class="ring-list">
           ${mini(st.members, '#3ee09a', '#12a868', 'عضو تأییدشده', 'var(--buy)')}
@@ -525,6 +535,16 @@
     </section>`;
   }
 
+  // Share of active offers per asset, shown as soft chips with a mini ring.
+  function allocationChips() {
+    const act = view.orders.filter((o) => o.status === 'active');
+    if (!act.length) return '';
+    const by = {};
+    for (const o of act) by[o.assetId] = (by[o.assetId] || 0) + 1;
+    const top = Object.entries(by).sort((a, b) => b[1] - a[1]).slice(0, 4);
+    return `<div class="chips">${top.map(([aid, n]) => { const a = asset(Number(aid)), p = Math.round((n / act.length) * 100);
+      return `<a class="chip-ring" href="#market" data-act="filter-asset" data-id="${aid}"><span class="chip-ring-ico">${ringSvg(p / 100, 40, 3.5, '#22d3ee', '#8b7cf6')}<b>${esc(a.code)}</b></span><span><b>${esc(a.name)}</b><small class="num">${p}٪ پیشنهادها</small></span></a>`; }).join('')}</div>`;
+  }
   function filteredOrders() {
     const f = ui.filters;
     let os = view.orders.filter((o) => o.status === 'active');
@@ -557,8 +577,8 @@
         <input class="input num" data-filter="min" placeholder="حداقل نرخ" inputmode="decimal" value="${esc(f.min)}">
         <input class="input num" data-filter="max" placeholder="حداکثر نرخ" inputmode="decimal" value="${esc(f.max)}">
         <input class="input num" data-filter="minAmount" placeholder="حداقل مقدار" inputmode="decimal" value="${esc(f.minAmount)}">
-        <input class="input" data-filter="q" placeholder="نام صرافی" value="${esc(f.q)}" ${approved() ? '' : 'disabled'}>
       </div>
+      ${approved() ? `<div style="padding:0 18px 12px"><label class="search-pill">${orb(SEARCH)}<input data-filter="q" placeholder="جستجوی نام صرافی" value="${esc(f.q)}"></label></div>` : ''}
       <div class="row" style="padding:4px 18px 8px">
         <span class="muted small" id="market-count"></span><span class="spacer"></span>
         <select class="input" style="width:auto;padding:6px 34px 6px 14px" data-filter="sort">
@@ -603,7 +623,7 @@
     const a0 = assets[0];
     return `${pageHead('ثبت سفارش', 'سفارش ثبت‌شده برای همه اعضای تأییدشده نمایش داده می‌شود.')}
     <div class="split">
-      <form class="card card-pad stack" data-form="order">
+      <form class="card card-pad stack aura" data-form="order">
         <div class="side-toggle">
           <button type="button" class="sell ${ui.side === 'sell' ? 'on' : ''}" data-act="side" data-v="sell">فروش</button>
           <button type="button" class="buy ${ui.side === 'buy' ? 'on' : ''}" data-act="side" data-v="buy">خرید</button>
@@ -685,7 +705,7 @@
             <div><span class="muted small">نرخ</span><div class="price"><span class="num">${fmt(o.price)}</span> <span class="small muted">${esc(o.priceCurrency)}</span></div></div>
             <div><span class="muted small">ارزش کل</span><div class="price"><span class="num">${fmt(total(o), 2)}</span> <span class="small muted">${esc(o.priceCurrency)}</span></div></div>
           </div>
-          <div style="margin-top:16px"><div class="row small muted" style="justify-content:space-between"><span>واگذار شده: <span class="num">${fmt(o.amount - o.remaining)}</span> ${esc(o.unit)}</span><span class="num">${pct}%</span></div><div class="progress"><i style="width:${pct}%"></i></div></div>
+          <div class="fill-row">${fillNum(pct, 'واگذار شده')}<div style="flex:1"><div class="small muted" style="margin-bottom:4px">واگذار شده: <span class="num">${fmt(o.amount - o.remaining)}</span> از <span class="num">${fmt(o.amount)}</span> ${esc(o.unit)}</div>${tipBar(pct)}</div></div>
           <dl class="kv" style="margin-top:16px">
             <dt>${o.side === 'sell' ? 'فروشنده' : 'خریدار'}</dt><dd>${nameLink(o.userId)}</dd>
             ${o.minAmount ? `<dt>حداقل مقدار درخواست</dt><dd class="num">${fmt(o.minAmount)} ${esc(o.unit)}</dd>` : ''}
@@ -823,7 +843,7 @@
       </div>
       <div class="split">
         <div class="stack">
-          <div class="card card-pad ${todo.length ? 'glow g-warm' : ''}"><h2>اقدامات لازم</h2>
+          <div class="card card-pad ${todo.length ? 'glow g-warm aura warm' : ''}"><h2>اقدامات لازم</h2>
             ${todo.length ? todo.map((x) => `<div class="todo"><span class="todo-dot"></span><div style="flex:1">${x.html}</div>${x.btn}</div>`).join('') : '<p class="muted" style="margin:0">موردی برای اقدام وجود ندارد.</p>'}</div>
           <div class="card card-pad"><h2>در انتظار طرف مقابل</h2>
             ${waiting.length ? waiting.map((x) => `<a class="todo" href="${x.href}" style="color:inherit"><span class="todo-dot muted-dot"></span><div style="flex:1">${x.html}</div><span class="muted">‹</span></a>`).join('') : '<p class="muted" style="margin:0">موردی وجود ندارد.</p>'}</div>
@@ -867,7 +887,7 @@
       rem[k].amt += o.remaining; rem[k].total += o.amount;
     }
     const v = Object.values(rem);
-    return v.length ? v.map((r) => `<div style="margin-bottom:12px"><div class="row small" style="justify-content:space-between"><span>${sideBadge(r.side)} ${esc(r.a.name)}</span><span><b class="num">${fmt(r.amt)}</b> / <span class="num">${fmt(r.total)}</span> ${esc(r.unit)}</span></div><div class="progress"><i style="width:${r.total ? Math.round((r.amt / r.total) * 100) : 0}%"></i></div></div>`).join('') : '<p class="muted small">سفارش فعالی ندارید.</p>';
+    return v.length ? v.map((r) => `<div style="margin-bottom:12px"><div class="row small" style="justify-content:space-between"><span>${sideBadge(r.side)} ${esc(r.a.name)}</span><span><b class="num">${fmt(r.amt)}</b> / <span class="num">${fmt(r.total)}</span> ${esc(r.unit)}</span></div>${tipBar(r.total ? Math.round((r.amt / r.total) * 100) : 0)}</div>`).join('') : '<p class="muted small">سفارش فعالی ندارید.</p>';
   }
   const sortDeals = (ds) => ds.slice().sort((a, b) => (a.status === 'pending' ? 0 : 1) - (b.status === 'pending' ? 0 : 1) || b.updatedAt - a.updatedAt);
   function dealsTable(ds) {
@@ -1016,7 +1036,7 @@
   /* ---------- auth ---------- */
   function pageLogin() {
     if (me()) return gate(`با حساب «${esc(me().company)}» وارد شده‌اید.`, '<a class="btn btn-primary" href="#dashboard">داشبورد</a>');
-    return `<div class="auth-wrap"><form class="card card-pad stack" data-form="login">
+    return `<div class="auth-wrap"><form class="card card-pad stack aura" data-form="login">
       <h1 style="margin:0;font-size:22px">ورود</h1>
       <label class="field"><span>شماره تماس</span><input class="input num" name="phone" inputmode="tel" placeholder="07xxxxxxxx" required autocomplete="username"></label>
       <label class="field"><span>رمز عبور</span><input class="input" type="password" name="password" required autocomplete="current-password"></label>
@@ -1028,7 +1048,7 @@
   }
   function pageRegister() {
     if (me()) return gate('وارد حساب خود شده‌اید.', '<a class="btn btn-primary" href="#dashboard">داشبورد</a>');
-    return `<div class="auth-wrap" style="max-width:600px"><form class="card card-pad stack" data-form="register">
+    return `<div class="auth-wrap" style="max-width:600px"><form class="card card-pad stack aura" data-form="register">
       <h1 style="margin:0;font-size:22px">درخواست عضویت</h1>
       <p class="muted" style="margin:0">حساب پس از بررسی مشخصات توسط مدیریت فعال می‌شود.</p>
       <div class="grid g2">
@@ -1053,7 +1073,7 @@
   const adminBack = () => '<a class="btn btn-sm" href="#admin" style="margin-bottom:16px">→ صفحه اصلی پنل</a>';
   function pageAdminLogin() {
     const L = ui.adminLogin, m = me();
-    return `<div class="auth-wrap"><form class="card card-pad stack glow" data-form="admin-login">
+    return `<div class="auth-wrap"><form class="card card-pad stack glow aura" data-form="admin-login">
       <div style="display:flex;justify-content:center"><span class="asset-ico" style="width:64px;height:64px">${ICON.shield}</span></div>
       <h1 style="margin:0;font-size:21px;text-align:center">ورود مدیر</h1>
       ${m && !isAdmin() ? '<div class="notice warn small">این حساب دسترسی مدیریت ندارد.</div>' : ''}
@@ -1101,7 +1121,7 @@
           <div class="card tile sheen"><span>سفارش فعال</span><b class="num" data-count="${view.stats.activeOrders}">${view.stats.activeOrders}</b></div>
           <div class="card tile sheen"><span>معامله در حال اجرا</span><b class="num" style="color:var(--blue-2)" data-count="${view.stats.activeDeals}">${view.stats.activeDeals}</b></div>
         </div>
-        <div class="card card-pad ${tasks.length ? 'glow g-warm' : ''}" style="margin-bottom:24px"><h2>کارهای امروز</h2>${tasks.length ? tasks.join('') : '<p class="muted" style="margin:0">مورد معوقی وجود ندارد.</p>'}</div>
+        <div class="card card-pad ${tasks.length ? 'glow g-warm aura warm' : ''}" style="margin-bottom:24px"><h2>کارهای امروز</h2>${tasks.length ? tasks.join('') : '<p class="muted" style="margin:0">مورد معوقی وجود ندارد.</p>'}</div>
         <div class="modules">${MODULES.map(([k, t, d, ic]) => `<a class="card module sheen" href="#admin-${k}"><span class="module-ico">${ic}</span><span class="module-txt"><b>${t}</b><small>${d}</small></span>${badge[k] ? `<span class="count-badge">${badge[k]}</span>` : ''}</a>`).join('')}</div>`;
     }
     if (tab === 'members') return adminMembers();
@@ -1194,7 +1214,7 @@
     return `${moduleHead('members')}
       <div class="card"><div class="row" style="padding:16px 18px;gap:12px">
         <div class="seg" style="overflow-x:auto;max-width:100%">${[['pending', `در انتظار (${A.counts.pending})`], ['approved', 'تأییدشده'], ['rejected', 'ردشده'], ['blocked', 'مسدود'], ['', 'همه']].map(([k, l]) => `<button class="${M.status === k ? 'on' : ''}" data-act="member-filter" data-v="${k}">${l}</button>`).join('')}</div>
-        <form data-form="member-search" class="row" style="flex:1;min-width:220px"><input class="input" name="q" value="${esc(M.q)}" placeholder="جستجو: نام، صرافی، ولایت یا شماره" style="flex:1"><button class="btn btn-sm">جستجو</button></form>
+        <form data-form="member-search" style="flex:1;min-width:240px"><label class="search-pill violet"><button class="glass-orb" aria-label="جستجو">${SEARCH}</button><input name="q" value="${esc(M.q)}" placeholder="نام، صرافی، ولایت یا شماره"></label></form>
       </div>
       ${M.loading && !list ? '<div class="empty">در حال دریافت…</div>' : rows.length ? `<div class="table-wrap"><table class="data responsive"><thead><tr><th>عضو</th><th>تماس</th><th>ولایت</th><th>فعالیت</th><th>وضعیت</th><th>ثبت‌نام</th><th></th></tr></thead><tbody>
         ${rows.map((u) => `<tr class="clickable" data-href="#admin-review-${u.id}"><td class="cell-main"><b>${esc(u.company)}</b> ${u.role === 'admin' ? '<span class="badge blue">مدیر</span>' : ''}<div class="muted small">${esc(u.name)}</div></td>
@@ -1237,7 +1257,7 @@
         ${u.statusReason ? `<div class="notice warn">آخرین دلیل ثبت‌شده: ${esc(u.statusReason)}</div>` : ''}
       </div>
       <aside class="stack">
-        <div class="card card-pad glow ${u.status === 'pending' ? 'g-warm' : ''}"><h3>تصمیم مدیریت</h3>
+        <div class="card card-pad glow aura ${u.status === 'pending' ? 'g-warm warm' : ''}"><h3>تصمیم مدیریت</h3>
           ${isSelf ? '<p class="muted small">حساب خود شما.</p>' : `<div class="stack">
             ${u.status !== 'approved' ? `<button class="btn btn-buy btn-block btn-lg" data-act="user-status" data-id="${u.id}" data-v="approved">تأیید عضویت</button>` : ''}
             ${u.status === 'pending' ? `<button class="btn btn-sell btn-block" data-act="reject-user" data-id="${u.id}">رد درخواست</button>` : ''}

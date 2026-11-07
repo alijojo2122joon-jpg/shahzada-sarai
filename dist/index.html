@@ -308,7 +308,7 @@ textarea.input { min-height: 90px; resize: vertical; }
 .side-toggle button.on.buy { background: linear-gradient(135deg, #3ee09a, #12a868); color: #06281a; box-shadow: 0 10px 24px -8px rgba(18,168,104,.8); }
 .total-box { border-radius: var(--radius-md); padding: 16px 20px; display: flex; justify-content: space-between; align-items: center; box-shadow: var(--in-sm); }
 .total-box b { font-size: 21px; color: var(--blue-2); text-shadow: 0 0 14px rgba(96,165,250,.35); }
-.filters { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; padding: 18px; }
+.filters { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; padding: 18px; }
 .form-error { background: var(--sell-soft); color: var(--sell); padding: 11px 16px; border-radius: var(--radius-sm); font-size: 14px; animation: pop .3s var(--flow); }
 .switch { appearance: none; width: 46px; height: 26px; border-radius: var(--pill); box-shadow: var(--in-sm); position: relative; cursor: pointer; flex: none; transition: background var(--t) var(--flow); margin: 0; }
 .switch::after { content: ''; position: absolute; top: 3px; right: 3px; width: 20px; height: 20px; border-radius: 50%; background: var(--raised); box-shadow: var(--out-sm); transition: transform var(--t) var(--flow), background var(--t); }
@@ -504,6 +504,118 @@ textarea.input { min-height: 90px; resize: vertical; }
   .stepper li::before { top: 14px; }
   .official-meta { align-items: flex-start; text-align: right; width: 100%; }
   .modules { grid-template-columns: 1fr; }
+}
+
+/* =====================================================================
+   Soft glass layer (v0.3): animated aura borders, looping light sweep,
+   glass orbs, knob buttons, 3D switch, tip progress, fill numbers, chips
+   ===================================================================== */
+@property --ang { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
+@property --p { syntax: '<percentage>'; inherits: false; initial-value: 0%; }
+@keyframes angSpin { to { --ang: 360deg; } }
+@keyframes sweepLoop { 0% { transform: translateX(-120%) skewX(-18deg); } 18%, 100% { transform: translateX(260%) skewX(-18deg); } }
+@keyframes fillUp { from { --p: 0%; } }
+@keyframes floaty { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+
+/* Pastel light theme, frosted cards (inspired by the references) */
+[data-theme="light"] body, [data-theme="light"] {
+  --bg: #eef1f8;
+  --raised: radial-gradient(120% 70% at 50% 125%, rgba(139,124,246,.16), transparent 60%), linear-gradient(160deg, rgba(255,255,255,.92), rgba(240,243,251,.82));
+  --surface: rgba(255,255,255,.72);
+  --chip-bg: rgba(255,255,255,.7);
+}
+[data-theme="light"] body {
+  background-image: radial-gradient(800px 500px at 0% 0%, rgba(167,139,250,.22), transparent 60%), radial-gradient(700px 500px at 100% 10%, rgba(96,165,250,.22), transparent 60%), radial-gradient(700px 600px at 10% 100%, rgba(251,191,170,.22), transparent 60%), radial-gradient(600px 500px at 100% 100%, rgba(125,211,252,.2), transparent 60%);
+}
+[data-theme="light"] .card { backdrop-filter: blur(16px) saturate(1.2); -webkit-backdrop-filter: blur(16px) saturate(1.2); border: 1px solid rgba(255,255,255,.75); }
+
+/* Animated aura: a slowly rotating light along the border */
+.aura {
+  border: 1.5px solid transparent !important;
+  background: var(--raised) padding-box, conic-gradient(from var(--ang), transparent 0deg, rgba(59,130,246,.0) 40deg, #3b82f6 90deg, #22d3ee 130deg, #8b7cf6 170deg, transparent 220deg, transparent 360deg) border-box !important;
+  animation: angSpin 7s linear infinite;
+}
+.aura.warm { background: var(--raised) padding-box, conic-gradient(from var(--ang), transparent 0deg, #ffb34d 80deg, #ff6b7a 140deg, transparent 210deg, transparent 360deg) border-box !important; }
+[data-theme="light"] .aura { background: linear-gradient(160deg, rgba(255,255,255,.95), rgba(240,243,251,.9)) padding-box, conic-gradient(from var(--ang), rgba(255,255,255,.8) 0deg, #60a5fa 90deg, #a78bfa 160deg, rgba(255,255,255,.8) 230deg, rgba(255,255,255,.8) 360deg) border-box !important; }
+.aura-round::before { content: ''; position: absolute; inset: -6px; border-radius: 50%; padding: 2px; background: conic-gradient(from var(--ang), transparent, #22d3ee, #3b82f6, #8b7cf6, transparent 55%); -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; animation: angSpin 5s linear infinite; z-index: 2; pointer-events: none; }
+
+/* Looping light sweep on soft shapes (not only on hover) */
+.sheen::before, .btn-primary::before, .btn-buy::before, .btn-sell::before, .btn-knob::after, .module::before { animation: sweepLoop 7s var(--flow-soft) infinite; }
+.grid > .sheen:nth-child(2)::before { animation-delay: .9s; } .grid > .sheen:nth-child(3)::before { animation-delay: 1.8s; } .grid > .sheen:nth-child(4)::before { animation-delay: 2.7s; }
+.modules > .module:nth-child(3n+2)::before { animation-delay: 1.2s; } .modules > .module:nth-child(3n)::before { animation-delay: 2.4s; }
+.official::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 30%; pointer-events: none; z-index: 1; background: linear-gradient(90deg, transparent, rgba(255,255,255,.06), transparent); animation: sweepLoop 9s var(--flow-soft) infinite; }
+[data-theme="light"] .official::before { background: linear-gradient(90deg, transparent, rgba(255,255,255,.7), transparent); }
+
+/* Wallet-style blurred colour header on the official board */
+.official-head { position: relative; isolation: isolate; }
+.official-head::after { content: ''; position: absolute; inset: 8px 12px 0; border-radius: 22px; z-index: -1; background: radial-gradient(40% 90% at 85% 30%, rgba(96,165,250,.28), transparent 70%), radial-gradient(35% 80% at 40% 70%, rgba(167,139,250,.22), transparent 70%), radial-gradient(30% 70% at 10% 20%, rgba(34,211,238,.16), transparent 70%); filter: blur(10px); }
+
+/* Glass orb (frosted circle) */
+.glass-orb { width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; flex: none; position: relative; border: 1px solid rgba(255,255,255,.55);
+  background: radial-gradient(circle at 35% 30%, rgba(255,255,255,.75), rgba(255,255,255,.18) 60%), rgba(255,255,255,.12);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); box-shadow: 0 10px 24px -8px rgba(30,40,90,.45), inset 0 1px 1px rgba(255,255,255,.8); color: #fff; cursor: pointer; padding: 0; }
+.glass-orb svg { filter: drop-shadow(0 1px 2px rgba(0,0,0,.25)); }
+
+/* Knob button: glass orb overlapping a gradient pill */
+.btn-knob { display: inline-flex; align-items: center; height: 54px; padding-inline-end: 26px; border-radius: var(--pill); color: #fff !important; font-weight: 800; font-size: 15px; gap: 14px; position: relative; overflow: hidden; isolation: isolate;
+  background: linear-gradient(135deg, #3b82f6, #1d4ed8); box-shadow: 0 14px 30px -12px rgba(37,99,235,.8); transition: transform var(--t) var(--flow), box-shadow var(--t) var(--flow); }
+.btn-knob .glass-orb { width: 54px; height: 54px; margin-inline-start: 0; transition: transform var(--t) var(--flow); }
+.btn-knob:hover { transform: translateY(-2px); box-shadow: 0 18px 36px -12px rgba(37,99,235,.9); }
+.btn-knob:hover .glass-orb { transform: scale(1.06) rotate(-8deg); }
+.btn-knob:active { transform: scale(.98); }
+.btn-knob.violet { background: linear-gradient(135deg, #8b5cf6, #6d28d9); box-shadow: 0 14px 30px -12px rgba(109,40,217,.8); }
+.btn-knob.pink { background: linear-gradient(135deg, #ec4899, #be185d); box-shadow: 0 14px 30px -12px rgba(190,24,93,.8); }
+.btn-knob::after { content: ''; position: absolute; inset: 0 auto 0 0; width: 40%; background: linear-gradient(90deg, transparent, rgba(255,255,255,.28), transparent); transform: translateX(-120%) skewX(-18deg); pointer-events: none; }
+
+/* Search pill */
+.search-pill { display: flex; align-items: center; gap: 12px; height: 54px; border-radius: var(--pill); padding-inline-end: 20px; background: linear-gradient(135deg, #3b82f6, #1d4ed8); box-shadow: 0 12px 28px -12px rgba(37,99,235,.75); transition: box-shadow var(--t) var(--flow); }
+.search-pill.violet { background: linear-gradient(135deg, #8b5cf6, #6d28d9); box-shadow: 0 12px 28px -12px rgba(109,40,217,.75); }
+.search-pill:focus-within { box-shadow: 0 16px 34px -10px rgba(37,99,235,.95), 0 0 0 3px rgba(96,165,250,.35); }
+.search-pill input { flex: 1; min-width: 0; background: transparent; border: 0; outline: none; color: #fff; font-size: 15px; font-weight: 600; }
+.search-pill input::placeholder { color: rgba(255,255,255,.75); }
+
+/* 3D toggle switch (thick rim, blue track, raised white knob) */
+.switch { appearance: none; width: 62px; height: 36px; border-radius: var(--pill); position: relative; cursor: pointer; flex: none; margin: 0;
+  background: linear-gradient(180deg, #d9dee8, #eef1f6); border: 4px solid #f7f8fb; box-shadow: 0 6px 14px -4px rgba(20,30,60,.35), inset 0 2px 4px rgba(0,0,0,.18); transition: background var(--t) var(--flow); }
+[data-theme="dark"] .switch, :root:not([data-theme="light"]) .switch { background: linear-gradient(180deg, #14171d, #1f232b); border-color: #2a2f39; }
+.switch::after { content: ''; position: absolute; top: 1px; right: 1px; width: 26px; height: 26px; border-radius: 50%; background: radial-gradient(circle at 35% 30%, #fff, #e6e9ef); box-shadow: 0 4px 8px rgba(0,0,0,.3), inset 0 -2px 3px rgba(0,0,0,.08); transition: transform var(--t) var(--flow); }
+.switch:checked { background: linear-gradient(180deg, #1d6fe0, #3b8bf6); box-shadow: 0 6px 16px -4px rgba(37,99,235,.6), inset 0 2px 4px rgba(0,0,0,.25); }
+.switch:checked::after { transform: translateX(-26px); }
+
+/* Progress with a percentage bubble */
+.tipbar { position: relative; padding-top: 30px; }
+.tipbar-track { height: 14px; border-radius: var(--pill); box-shadow: var(--in-sm); padding: 2px; overflow: hidden; }
+.tipbar-track i { display: block; height: 100%; border-radius: var(--pill); background: linear-gradient(180deg, #b6f0c8, #6fd59a); box-shadow: inset 0 1px 0 rgba(255,255,255,.6), 0 0 10px rgba(47,211,137,.45); transform-origin: right; animation: grow 1.3s var(--flow) both; }
+.tipbar-tip { position: absolute; top: 0; min-width: 44px; text-align: center; font-size: 11.5px; font-weight: 800; padding: 3px 8px; border-radius: 8px; background: var(--raised); box-shadow: var(--out-sm); color: var(--ink-2); animation: pop .6s .5s var(--flow) both; }
+.tipbar-tip::after { content: ''; position: absolute; bottom: -5px; left: 50%; transform: translateX(-50%); border: 5px solid transparent; border-bottom: 0; border-top-color: var(--surface); }
+
+/* Liquid fill number */
+.fill-row { display: flex; align-items: center; gap: 22px; margin-top: 18px; }
+.fill-wrap { display: flex; flex-direction: column; align-items: center; }
+.fill-num { font-size: 58px; font-weight: 900; line-height: 1; letter-spacing: -2px; background: linear-gradient(to top, #22c3e6 var(--p), rgba(140,150,170,.35) var(--p)); -webkit-background-clip: text; background-clip: text; color: transparent; animation: fillUp 1.8s var(--flow) both; filter: drop-shadow(0 2px 6px rgba(34,195,230,.25)); }
+.fill-num small { font-size: 24px; letter-spacing: 0; }
+
+/* Allocation chips */
+.chips { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 20px; }
+.chip-ring { display: flex; align-items: center; gap: 10px; padding: 7px 16px 7px 8px; border-radius: var(--pill); background: var(--raised); box-shadow: var(--out-sm); color: inherit !important; font-size: 13px; transition: transform var(--t) var(--flow); }
+.chip-ring:hover { transform: translateY(-2px); }
+.chip-ring small { display: block; color: var(--ink-3); font-size: 11.5px; }
+.chip-ring-ico { position: relative; width: 40px; height: 40px; display: grid; place-items: center; }
+.chip-ring-ico svg { position: absolute; inset: 0; transform: rotate(-90deg); }
+.chip-ring-ico b { font-size: 9px; position: relative; color: var(--blue-2); }
+
+/* Bottom navigation: centre plus orb (Finory style) */
+.bottom-nav a.plus { flex: 0 0 auto; padding: 0; margin-top: -26px; background: none !important; box-shadow: none !important; }
+.plus-orb { width: 62px; height: 62px; border-radius: 50%; display: grid; place-items: center; color: var(--pill-active-ink); background: var(--pill-active-bg); box-shadow: 0 12px 26px -8px rgba(37,99,235,.6), var(--out-sm); border: 4px solid var(--bg); animation: floaty 4s var(--flow-soft) infinite; transition: transform var(--t) var(--flow); }
+.bottom-nav a.plus:active .plus-orb { transform: scale(.92); }
+.bottom-nav a.plus.active .plus-orb { background: linear-gradient(135deg, #4f8ff8, #2563eb); color: #fff; }
+
+@media (max-width: 640px) {
+  .btn-knob { height: 50px; font-size: 14px; padding-inline-end: 20px; }
+  .btn-knob .glass-orb { width: 50px; height: 50px; }
+  .fill-num { font-size: 46px; }
+  .fill-row { gap: 14px; }
+  .chips { gap: 8px; }
 }
 
 </style>
@@ -1448,6 +1560,13 @@ textarea.input { min-height: 90px; resize: vertical; }
   const waHref = (ph) => `https://wa.me/${esc(String(ph).replace(/^0/, '93').replace(/\D/g, ''))}`;
   const pageHead = (title, sub, actions = '') => `<div class="page-head"><div><h1>${title}</h1>${sub ? `<p>${sub}</p>` : ''}</div>${actions ? `<div class="row">${actions}</div>` : ''}</div>`;
 
+  const SEARCH = svg('<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>', 22);
+  const orb = (icon) => `<span class="glass-orb">${icon}</span>`;
+  const knobBtn = (href, label, icon, tone = '') => `<a class="btn-knob ${tone}" href="${href}">${orb(icon)}<span>${label}</span></a>`;
+  // Progress bar with a percentage bubble above the fill.
+  const tipBar = (pct) => `<div class="tipbar"><div class="tipbar-track"><i style="width:${pct}%"></i></div><span class="tipbar-tip num" style="right:calc(${pct}% - 22px)">${pct}%</span></div>`;
+  // Large number that fills with colour up to the given percentage.
+  const fillNum = (pct, label) => `<div class="fill-wrap"><span class="fill-num num" style="--p:${pct}%">${pct}<small>%</small></span>${label ? `<span class="muted small">${label}</span>` : ''}</div>`;
   let ringSeq = 0;
   function ringSvg(frac, size, stroke, c1, c2) {
     const id = 'rg' + (++ringSeq), r = (size - stroke) / 2, len = 2 * Math.PI * r;
@@ -1615,7 +1734,9 @@ textarea.input { min-height: 90px; resize: vertical; }
   function bottomNav(r) {
     const items = [['home', 'خانه', ICON.nHome], ['rates', 'نرخ رسمی', ICON.nRates], ['new', 'ثبت', ICON.nNew], ['market', 'بازار', ICON.nMarket],
       me() ? ['dashboard', 'داشبورد', ICON.nDash] : ['login', 'ورود', ICON.nDash]];
-    return `<nav class="bottom-nav">${items.map(([h, l, ic]) => `<a href="#${h}" class="${r === h || r.startsWith(h + '-') ? 'active' : ''}">${ic}<span>${l}</span></a>`).join('')}</nav>`;
+    return `<nav class="bottom-nav">${items.map(([h, l, ic]) => h === 'new'
+      ? `<a href="#new" class="plus ${r === 'new' ? 'active' : ''}" aria-label="ثبت سفارش"><span class="plus-orb">${svg('<path d="M12 5v14M5 12h14"/>', 26)}</span></a>`
+      : `<a href="#${h}" class="${r === h || r.startsWith(h + '-') ? 'active' : ''}">${ic}<span>${l}</span></a>`).join('')}</nav>`;
   }
   function footer() {
     if (ADMIN_MODE) return '<footer class="footer">دسترسی به این بخش محدود به مدیران مجاز است. همه عملیات ثبت و نگهداری می‌شود.</footer>';
@@ -1725,7 +1846,7 @@ textarea.input { min-height: 90px; resize: vertical; }
   function officialBoard({ compact = false } = {}) {
     const rows = view.rates.map((r) => ({ r, a: asset(r.assetId) })).filter((x) => x.a.active !== false);
     const last = rows.reduce((m, x) => Math.max(m, x.r.updatedAt || 0), 0);
-    return `<section class="card official glow">
+    return `<section class="card official glow aura">
       <div class="official-head">
         <div><span class="seal">${ICON.seal}</span></div>
         <div style="flex:1"><h2>نرخ رسمی بازار</h2><div class="muted small">${longDate.format(new Date())}</div></div>
@@ -1758,12 +1879,13 @@ textarea.input { min-height: 90px; resize: vertical; }
         <h1 style="font-size:24px">وضعیت بازار</h1>
         <p>پیشنهادهای خرید و فروش اعضای تأییدشده سرای شهزاده. برای ارسال درخواست معامله، عضویت و تأیید مدیریت لازم است.</p>
         <div class="row">
-          <a class="btn btn-primary btn-lg" href="#market">مشاهده بازار</a>
-          <a class="btn btn-lg" href="${approved() ? '#new' : me() ? '#profile' : '#register'}">${approved() ? 'ثبت سفارش' : me() ? 'وضعیت حساب' : 'درخواست عضویت'}</a>
+          ${knobBtn('#market', 'مشاهده بازار', ICON.nMarket)}
+          ${knobBtn(approved() ? '#new' : me() ? '#profile' : '#register', approved() ? 'ثبت سفارش' : me() ? 'وضعیت حساب' : 'درخواست عضویت', approved() ? ICON.nNew : ICON.users, 'violet')}
         </div>
+        ${allocationChips()}
       </div>
       <div class="rings">
-        <div class="ring-big glow"><span class="halo"></span>${ringSvg(n ? st.sellOrders / n : 0.02, 250, 14, '#22d3ee', '#3b82f6')}
+        <div class="ring-big glow aura-round"><span class="halo"></span>${ringSvg(n ? st.sellOrders / n : 0.02, 250, 14, '#22d3ee', '#3b82f6')}
           <div class="center"><b class="num" data-count="${n}">${n}</b><span>پیشنهاد فعال</span><em>${st.sellOrders} فروش · ${st.buyOrders} خرید</em></div></div>
         <div class="ring-list">
           ${mini(st.members, '#3ee09a', '#12a868', 'عضو تأییدشده', 'var(--buy)')}
@@ -1780,6 +1902,16 @@ textarea.input { min-height: 90px; resize: vertical; }
     </section>`;
   }
 
+  // Share of active offers per asset, shown as soft chips with a mini ring.
+  function allocationChips() {
+    const act = view.orders.filter((o) => o.status === 'active');
+    if (!act.length) return '';
+    const by = {};
+    for (const o of act) by[o.assetId] = (by[o.assetId] || 0) + 1;
+    const top = Object.entries(by).sort((a, b) => b[1] - a[1]).slice(0, 4);
+    return `<div class="chips">${top.map(([aid, n]) => { const a = asset(Number(aid)), p = Math.round((n / act.length) * 100);
+      return `<a class="chip-ring" href="#market" data-act="filter-asset" data-id="${aid}"><span class="chip-ring-ico">${ringSvg(p / 100, 40, 3.5, '#22d3ee', '#8b7cf6')}<b>${esc(a.code)}</b></span><span><b>${esc(a.name)}</b><small class="num">${p}٪ پیشنهادها</small></span></a>`; }).join('')}</div>`;
+  }
   function filteredOrders() {
     const f = ui.filters;
     let os = view.orders.filter((o) => o.status === 'active');
@@ -1812,8 +1944,8 @@ textarea.input { min-height: 90px; resize: vertical; }
         <input class="input num" data-filter="min" placeholder="حداقل نرخ" inputmode="decimal" value="${esc(f.min)}">
         <input class="input num" data-filter="max" placeholder="حداکثر نرخ" inputmode="decimal" value="${esc(f.max)}">
         <input class="input num" data-filter="minAmount" placeholder="حداقل مقدار" inputmode="decimal" value="${esc(f.minAmount)}">
-        <input class="input" data-filter="q" placeholder="نام صرافی" value="${esc(f.q)}" ${approved() ? '' : 'disabled'}>
       </div>
+      ${approved() ? `<div style="padding:0 18px 12px"><label class="search-pill">${orb(SEARCH)}<input data-filter="q" placeholder="جستجوی نام صرافی" value="${esc(f.q)}"></label></div>` : ''}
       <div class="row" style="padding:4px 18px 8px">
         <span class="muted small" id="market-count"></span><span class="spacer"></span>
         <select class="input" style="width:auto;padding:6px 34px 6px 14px" data-filter="sort">
@@ -1858,7 +1990,7 @@ textarea.input { min-height: 90px; resize: vertical; }
     const a0 = assets[0];
     return `${pageHead('ثبت سفارش', 'سفارش ثبت‌شده برای همه اعضای تأییدشده نمایش داده می‌شود.')}
     <div class="split">
-      <form class="card card-pad stack" data-form="order">
+      <form class="card card-pad stack aura" data-form="order">
         <div class="side-toggle">
           <button type="button" class="sell ${ui.side === 'sell' ? 'on' : ''}" data-act="side" data-v="sell">فروش</button>
           <button type="button" class="buy ${ui.side === 'buy' ? 'on' : ''}" data-act="side" data-v="buy">خرید</button>
@@ -1940,7 +2072,7 @@ textarea.input { min-height: 90px; resize: vertical; }
             <div><span class="muted small">نرخ</span><div class="price"><span class="num">${fmt(o.price)}</span> <span class="small muted">${esc(o.priceCurrency)}</span></div></div>
             <div><span class="muted small">ارزش کل</span><div class="price"><span class="num">${fmt(total(o), 2)}</span> <span class="small muted">${esc(o.priceCurrency)}</span></div></div>
           </div>
-          <div style="margin-top:16px"><div class="row small muted" style="justify-content:space-between"><span>واگذار شده: <span class="num">${fmt(o.amount - o.remaining)}</span> ${esc(o.unit)}</span><span class="num">${pct}%</span></div><div class="progress"><i style="width:${pct}%"></i></div></div>
+          <div class="fill-row">${fillNum(pct, 'واگذار شده')}<div style="flex:1"><div class="small muted" style="margin-bottom:4px">واگذار شده: <span class="num">${fmt(o.amount - o.remaining)}</span> از <span class="num">${fmt(o.amount)}</span> ${esc(o.unit)}</div>${tipBar(pct)}</div></div>
           <dl class="kv" style="margin-top:16px">
             <dt>${o.side === 'sell' ? 'فروشنده' : 'خریدار'}</dt><dd>${nameLink(o.userId)}</dd>
             ${o.minAmount ? `<dt>حداقل مقدار درخواست</dt><dd class="num">${fmt(o.minAmount)} ${esc(o.unit)}</dd>` : ''}
@@ -2078,7 +2210,7 @@ textarea.input { min-height: 90px; resize: vertical; }
       </div>
       <div class="split">
         <div class="stack">
-          <div class="card card-pad ${todo.length ? 'glow g-warm' : ''}"><h2>اقدامات لازم</h2>
+          <div class="card card-pad ${todo.length ? 'glow g-warm aura warm' : ''}"><h2>اقدامات لازم</h2>
             ${todo.length ? todo.map((x) => `<div class="todo"><span class="todo-dot"></span><div style="flex:1">${x.html}</div>${x.btn}</div>`).join('') : '<p class="muted" style="margin:0">موردی برای اقدام وجود ندارد.</p>'}</div>
           <div class="card card-pad"><h2>در انتظار طرف مقابل</h2>
             ${waiting.length ? waiting.map((x) => `<a class="todo" href="${x.href}" style="color:inherit"><span class="todo-dot muted-dot"></span><div style="flex:1">${x.html}</div><span class="muted">‹</span></a>`).join('') : '<p class="muted" style="margin:0">موردی وجود ندارد.</p>'}</div>
@@ -2122,7 +2254,7 @@ textarea.input { min-height: 90px; resize: vertical; }
       rem[k].amt += o.remaining; rem[k].total += o.amount;
     }
     const v = Object.values(rem);
-    return v.length ? v.map((r) => `<div style="margin-bottom:12px"><div class="row small" style="justify-content:space-between"><span>${sideBadge(r.side)} ${esc(r.a.name)}</span><span><b class="num">${fmt(r.amt)}</b> / <span class="num">${fmt(r.total)}</span> ${esc(r.unit)}</span></div><div class="progress"><i style="width:${r.total ? Math.round((r.amt / r.total) * 100) : 0}%"></i></div></div>`).join('') : '<p class="muted small">سفارش فعالی ندارید.</p>';
+    return v.length ? v.map((r) => `<div style="margin-bottom:12px"><div class="row small" style="justify-content:space-between"><span>${sideBadge(r.side)} ${esc(r.a.name)}</span><span><b class="num">${fmt(r.amt)}</b> / <span class="num">${fmt(r.total)}</span> ${esc(r.unit)}</span></div>${tipBar(r.total ? Math.round((r.amt / r.total) * 100) : 0)}</div>`).join('') : '<p class="muted small">سفارش فعالی ندارید.</p>';
   }
   const sortDeals = (ds) => ds.slice().sort((a, b) => (a.status === 'pending' ? 0 : 1) - (b.status === 'pending' ? 0 : 1) || b.updatedAt - a.updatedAt);
   function dealsTable(ds) {
@@ -2271,7 +2403,7 @@ textarea.input { min-height: 90px; resize: vertical; }
   /* ---------- auth ---------- */
   function pageLogin() {
     if (me()) return gate(`با حساب «${esc(me().company)}» وارد شده‌اید.`, '<a class="btn btn-primary" href="#dashboard">داشبورد</a>');
-    return `<div class="auth-wrap"><form class="card card-pad stack" data-form="login">
+    return `<div class="auth-wrap"><form class="card card-pad stack aura" data-form="login">
       <h1 style="margin:0;font-size:22px">ورود</h1>
       <label class="field"><span>شماره تماس</span><input class="input num" name="phone" inputmode="tel" placeholder="07xxxxxxxx" required autocomplete="username"></label>
       <label class="field"><span>رمز عبور</span><input class="input" type="password" name="password" required autocomplete="current-password"></label>
@@ -2283,7 +2415,7 @@ textarea.input { min-height: 90px; resize: vertical; }
   }
   function pageRegister() {
     if (me()) return gate('وارد حساب خود شده‌اید.', '<a class="btn btn-primary" href="#dashboard">داشبورد</a>');
-    return `<div class="auth-wrap" style="max-width:600px"><form class="card card-pad stack" data-form="register">
+    return `<div class="auth-wrap" style="max-width:600px"><form class="card card-pad stack aura" data-form="register">
       <h1 style="margin:0;font-size:22px">درخواست عضویت</h1>
       <p class="muted" style="margin:0">حساب پس از بررسی مشخصات توسط مدیریت فعال می‌شود.</p>
       <div class="grid g2">
@@ -2308,7 +2440,7 @@ textarea.input { min-height: 90px; resize: vertical; }
   const adminBack = () => '<a class="btn btn-sm" href="#admin" style="margin-bottom:16px">→ صفحه اصلی پنل</a>';
   function pageAdminLogin() {
     const L = ui.adminLogin, m = me();
-    return `<div class="auth-wrap"><form class="card card-pad stack glow" data-form="admin-login">
+    return `<div class="auth-wrap"><form class="card card-pad stack glow aura" data-form="admin-login">
       <div style="display:flex;justify-content:center"><span class="asset-ico" style="width:64px;height:64px">${ICON.shield}</span></div>
       <h1 style="margin:0;font-size:21px;text-align:center">ورود مدیر</h1>
       ${m && !isAdmin() ? '<div class="notice warn small">این حساب دسترسی مدیریت ندارد.</div>' : ''}
@@ -2356,7 +2488,7 @@ textarea.input { min-height: 90px; resize: vertical; }
           <div class="card tile sheen"><span>سفارش فعال</span><b class="num" data-count="${view.stats.activeOrders}">${view.stats.activeOrders}</b></div>
           <div class="card tile sheen"><span>معامله در حال اجرا</span><b class="num" style="color:var(--blue-2)" data-count="${view.stats.activeDeals}">${view.stats.activeDeals}</b></div>
         </div>
-        <div class="card card-pad ${tasks.length ? 'glow g-warm' : ''}" style="margin-bottom:24px"><h2>کارهای امروز</h2>${tasks.length ? tasks.join('') : '<p class="muted" style="margin:0">مورد معوقی وجود ندارد.</p>'}</div>
+        <div class="card card-pad ${tasks.length ? 'glow g-warm aura warm' : ''}" style="margin-bottom:24px"><h2>کارهای امروز</h2>${tasks.length ? tasks.join('') : '<p class="muted" style="margin:0">مورد معوقی وجود ندارد.</p>'}</div>
         <div class="modules">${MODULES.map(([k, t, d, ic]) => `<a class="card module sheen" href="#admin-${k}"><span class="module-ico">${ic}</span><span class="module-txt"><b>${t}</b><small>${d}</small></span>${badge[k] ? `<span class="count-badge">${badge[k]}</span>` : ''}</a>`).join('')}</div>`;
     }
     if (tab === 'members') return adminMembers();
@@ -2449,7 +2581,7 @@ textarea.input { min-height: 90px; resize: vertical; }
     return `${moduleHead('members')}
       <div class="card"><div class="row" style="padding:16px 18px;gap:12px">
         <div class="seg" style="overflow-x:auto;max-width:100%">${[['pending', `در انتظار (${A.counts.pending})`], ['approved', 'تأییدشده'], ['rejected', 'ردشده'], ['blocked', 'مسدود'], ['', 'همه']].map(([k, l]) => `<button class="${M.status === k ? 'on' : ''}" data-act="member-filter" data-v="${k}">${l}</button>`).join('')}</div>
-        <form data-form="member-search" class="row" style="flex:1;min-width:220px"><input class="input" name="q" value="${esc(M.q)}" placeholder="جستجو: نام، صرافی، ولایت یا شماره" style="flex:1"><button class="btn btn-sm">جستجو</button></form>
+        <form data-form="member-search" style="flex:1;min-width:240px"><label class="search-pill violet"><button class="glass-orb" aria-label="جستجو">${SEARCH}</button><input name="q" value="${esc(M.q)}" placeholder="نام، صرافی، ولایت یا شماره"></label></form>
       </div>
       ${M.loading && !list ? '<div class="empty">در حال دریافت…</div>' : rows.length ? `<div class="table-wrap"><table class="data responsive"><thead><tr><th>عضو</th><th>تماس</th><th>ولایت</th><th>فعالیت</th><th>وضعیت</th><th>ثبت‌نام</th><th></th></tr></thead><tbody>
         ${rows.map((u) => `<tr class="clickable" data-href="#admin-review-${u.id}"><td class="cell-main"><b>${esc(u.company)}</b> ${u.role === 'admin' ? '<span class="badge blue">مدیر</span>' : ''}<div class="muted small">${esc(u.name)}</div></td>
@@ -2492,7 +2624,7 @@ textarea.input { min-height: 90px; resize: vertical; }
         ${u.statusReason ? `<div class="notice warn">آخرین دلیل ثبت‌شده: ${esc(u.statusReason)}</div>` : ''}
       </div>
       <aside class="stack">
-        <div class="card card-pad glow ${u.status === 'pending' ? 'g-warm' : ''}"><h3>تصمیم مدیریت</h3>
+        <div class="card card-pad glow aura ${u.status === 'pending' ? 'g-warm warm' : ''}"><h3>تصمیم مدیریت</h3>
           ${isSelf ? '<p class="muted small">حساب خود شما.</p>' : `<div class="stack">
             ${u.status !== 'approved' ? `<button class="btn btn-buy btn-block btn-lg" data-act="user-status" data-id="${u.id}" data-v="approved">تأیید عضویت</button>` : ''}
             ${u.status === 'pending' ? `<button class="btn btn-sell btn-block" data-act="reject-user" data-id="${u.id}">رد درخواست</button>` : ''}
